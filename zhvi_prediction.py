@@ -7,12 +7,15 @@ import pandas as pd
 
 st.title("Zillow Home Prediction App")
 
-# Load data
-url = "https://drive.google.com/file/d/1wcabOuayxwGUzj_cd5k5fIboKFBce4yj/view?usp=sharing"
+# Direct file ID from Google Drive link
+file_id = "1wcabOuayxwGUzj_cd5k5fIboKFBce4yj"
+download_url = f"https://drive.google.com/uc?id={file_id}"
 
 @st.cache_data
 def load_data():
-    return pd.read_csv(url)
+    output = "zillow_data.csv"
+    gdown.download(download_url, output, quiet=False)
+    return pd.read_csv(output)
 
 data = load_data()
 
