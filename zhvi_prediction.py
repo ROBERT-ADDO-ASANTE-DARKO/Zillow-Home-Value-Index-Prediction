@@ -8,7 +8,7 @@ import pandas as pd
 st.title("Zillow Home Prediction App")
 
 # Load data
-data = pd.read_csv("/teamspace/studios/this_studio/time_series_projects/zillow_data.csv")
+data = pd.read_csv("data/zillow_data.csv")
 data.rename({"RegionName": "Zipcode"}, axis="columns", inplace=True)
 
 # Define a dictionary with city coordinates
