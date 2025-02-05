@@ -1,0 +1,132 @@
+import streamlit as st
+from datetime import date
+from prophet import Prophet
+from prophet.plot import plot_plotly
+from plotly import graph_objs as go
+import pandas as pd
+
+st.title("Zillow Home Prediction App")
+
+# Load data
+data = pd.read_csv("/teamspace/studios/this_studio/time_series_projects/zillow_data.csv")
+data.rename({"RegionName": "Zipcode"}, axis="columns", inplace=True)
+
+# Define a dictionary with city coordinates
+city_coordinates = {
+    "New York": (40.7128, -74.0060),
+    "San Francisco": (37.7749, -122.4194),
+    "Los Angeles": (34.0522, -118.2437),
+    "Seattle": (47.6062, -122.3321),
+    "Chicago": (41.8781, -87.6298),
+    "Houston": (29.7604, -95.3698),
+    "Philadelphia": (39.9526, -75.1652),
+    "Phoenix": (33.4484, -112.0740),
+    "San Antonio": (29.4241, -98.4936),
+    "San Diego": (32.7157, -117.1611),
+    "Dallas": (32.7767, -96.7970),
+    "San Jose": (37.3382, -121.8863),
+    "Austin": (30.2672, -97.7431),
+    "Jacksonville": (30.3322, -81.6557),
+    "Fort Worth": (32.7555, -97.3331),
+    "Columbus": (39.9612, -82.9988),
+    "Indianapolis": (39.7684, -86.1581),
+    "Charlotte": (35.2271, -80.8431),
+    "San Francisco": (37.7749, -122.4194),
+    "Seattle": (47.6062, -122.3321),
+    "Denver": (39.7392, -104.9903),
+    "Washington": (38.8951, -77.0369),
+    "Boston": (42.3601, -71.0589),
+    "El Paso": (31.7619, -106.4850),
+    "Detroit": (42.3314, -83.0458),
+    "Nashville": (36.1627, -86.7816),
+    "Baltimore": (39.2904, -76.6122),
+    "Oklahoma City": (35.4676, -97.5164),
+    "Las Vegas": (36.1699, -115.1398),
+    "Louisville": (38.2527, -85.7585),
+    "Milwaukee": (43.0389, -87.9065),
+    "Albuquerque": (35.0844, -106.6504),
+    "Tucson": (32.2226, -110.9747),
+    "Fresno": (36.7378, -119.7871),
+    "Sacramento": (38.58, -121.49),
+    "Kansas City": (39.0997, -94.5786),
+    "Mesa": (33.4152, -111.8315),
+    "Virginia Beach": (36.8529, -75.9780),
+    "Atlanta": (33.7490, -84.3880),
+    "Colorado Springs": (38.8339, -104.8214),
+    "Omaha": (41.2565, -95.9345),
+    "Raleigh": (35.7796, -78.6382),
+    "Miami": (25.7617, -80.1918),
+    "Cleveland": (41.4993, -81.6944),
+    "Tulsa": (36.1540, -95.9928),
+    "Oakland": (37.8049, -122.2711),
+    "Minneapolis": (44.9778, -93.2650),
+    "Wichita": (37.6872, -97.3301),
+    "Arlington": (32.7357, -97.1081),
+    "Bakersfield": (35.3733, -119.0187),
+    "New Orleans": (29.9511, -90.0715),
+    "Honolulu": (21.3069, -157.8583),
+    "Anaheim": (33.8366, -117.9143),
+    "Tampa": (27.9506, -82.4572)
+}
+
+# Get list of unique cities
+cities = data["City"].unique()
+selected_city = st.selectbox("Select a city for prediction:", cities)
+
+# Filter data based on selected city
+city_data = data.loc[data["City"] == selected_city]
+
+# Retrieve coordinates for the selected city from the dictionary
+coordinates = city_coordinates.get(selected_city, (None, None))
+city_location = pd.DataFrame([coordinates], columns=['LAT', 'LON'])
+
+# Display map
+st.subheader(f"Map for {selected_city}")
+if coordinates[0] is None or coordinates[1] is None:
+    st.write("Coordinates not available for the selected city.")
+else:
+    st.map(city_location)
+
+n_years = st.slider("Years of prediction:", 1, 20)
+period = n_years * 365
+
+def melt_data(df):
+    melted = pd.melt(df, id_vars=["RegionID", "Zipcode", "City", "State", "Metro", "CountyName", "SizeRank"], var_name="time")
+    melted["time"] = pd.to_datetime(melted["time"], infer_datetime_format=True)
+    melted = melted.dropna(subset=["value"])
+    return melted.groupby("time").aggregate({"value": "mean"}).reset_index()
+
+data_load_state = st.text("Loading data...")
+city_data_melted = melt_data(city_data)
+data_load_state.text("Loading data...done!")
+
+st.subheader(f"Raw data for {selected_city}")
+st.write(city_data_melted.tail())
+
+def plot_raw_data():
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=city_data_melted['time'], y=city_data_melted['value'], name=selected_city, line_color="red"))
+    fig.layout.update(title_text=f"{selected_city} Home Value Index", width=600, height=600, xaxis_rangeslider_visible=True)
+    st.plotly_chart(fig)
+
+plot_raw_data()
+
+# Forecasting
+df_train = city_data_melted[["time", "value"]]
+df_train = df_train.rename(columns={"time": "ds", "value": "y"})
+
+model = Prophet()
+model.fit(df_train)
+future = model.make_future_dataframe(periods=period)
+forecast = model.predict(future)
+
+st.subheader("Forecast data")
+st.write(forecast.tail(20))
+
+st.write("Forecast data")
+fig1 = plot_plotly(model, forecast, figsize=(600, 600))
+st.plotly_chart(fig1)
+
+st.write("Forecast components")
+fig2 = model.plot_components(forecast)
+st.write(fig2)
