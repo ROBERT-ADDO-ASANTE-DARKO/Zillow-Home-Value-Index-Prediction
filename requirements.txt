@@ -2,3 +2,4 @@ streamlit
 prophet
 plotly
 pandas
+gdown
