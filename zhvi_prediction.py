@@ -8,7 +8,14 @@ import pandas as pd
 st.title("Zillow Home Prediction App")
 
 # Load data
-data = pd.read_csv("data/zillow_data.csv")
+url = "https://drive.google.com/file/d/1wcabOuayxwGUzj_cd5k5fIboKFBce4yj/view?usp=drive_link"
+
+@st.cache_data
+def load_data():
+    return pd.read_csv(url)
+
+data = load_data()
+
 data.rename({"RegionName": "Zipcode"}, axis="columns", inplace=True)
 
 # Define a dictionary with city coordinates
