@@ -8,7 +8,7 @@ import pandas as pd
 st.title("Zillow Home Prediction App")
 
 # Load data
-url = "https://drive.google.com/file/d/1wcabOuayxwGUzj_cd5k5fIboKFBce4yj/view?usp=drive_link"
+url = "https://drive.google.com/file/d/1wcabOuayxwGUzj_cd5k5fIboKFBce4yj/view?usp=sharing"
 
 @st.cache_data
 def load_data():
