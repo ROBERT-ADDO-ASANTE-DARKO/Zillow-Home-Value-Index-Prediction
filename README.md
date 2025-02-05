@@ -52,7 +52,8 @@ streamlit run zhvi_prediction.py
 ## 📷 Screenshots
 | Home Page | Forecast Results |
 |-----------|----------------|
-| ![Home Page](https://via.placeholder.com/400) | ![Forecast](https://via.placeholder.com/400) |
+| ![Home Page](![Screenshot 2025-02-05 022945](https://github.com/user-attachments/assets/90f6de11-c03b-4c20-8f4e-97fe2e90d089))
+ | ![Forecast]() |
 
 ## 🔍 Future Improvements
 - Add more **data sources** for improved accuracy.
