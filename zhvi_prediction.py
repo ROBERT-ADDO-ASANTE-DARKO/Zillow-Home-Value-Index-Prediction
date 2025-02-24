@@ -149,6 +149,18 @@ def plot_raw_data(df, title):
 plot_raw_data(city_data_melted, f"{selected_city} Home Value Index")
 plot_raw_data(zipcode_data_melted, f"Zipcode {selected_zipcode} Home Value Index")
 
+# Calculate market health metrics
+volatility = city_data_melted["value"].std()
+roi = (city_data_melted["value"].iloc[-1] - city_data_melted["value"].iloc[0]) / city_data_melted["value"].iloc[0]
+risk_score = (volatility * 0.6) + (roi * 0.4)  # Example formula
+
+# Display metrics
+st.subheader("Market Health Dashboard")
+col1, col2, col3 = st.columns(3)
+col1.metric("Volatility", f"{volatility:.2f}")
+col2.metric("ROI", f"{roi:.2%}")
+col3.metric("Risk Score", f"{risk_score:.2f}")
+
 # Forecasting for the selected zipcode
 df_train = zipcode_data_melted[["time", "value"]]
 df_train = df_train.rename(columns={"time": "ds", "value": "y"})
