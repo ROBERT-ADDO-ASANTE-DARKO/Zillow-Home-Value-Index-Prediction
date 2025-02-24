@@ -3,3 +3,5 @@ prophet
 plotly
 pandas
 gdown
+folium
+streamlit-folium
