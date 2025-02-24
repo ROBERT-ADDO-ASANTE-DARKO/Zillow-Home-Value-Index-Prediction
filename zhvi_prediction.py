@@ -9,24 +9,103 @@ import folium
 from streamlit_folium import folium_static
 from folium.plugins import HeatMap
 
-st.title("Zillow Home Prediction App")
+# Page configuration
+st.set_page_config(
+    page_title="Zillow Home Price Prediction",
+    page_icon="🏠",
+    layout="wide"
+)
 
-# Direct file ID from Google Drive link
-file_id = "1wcabOuayxwGUzj_cd5k5fIboKFBce4yj"
-download_url = f"https://drive.google.com/uc?id={file_id}"
+# Add custom CSS
+st.markdown("""
+    <style>
+    .main {
+        padding: 1rem;
+    }
+    .stMetric {
+        background-color: #f0f2f6;
+        padding: 1rem;
+        border-radius: 0.5rem;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-@st.cache_data
-def load_data():
-    output = "zillow_data.csv"
-    gdown.download(download_url, output, quiet=False)
-    return pd.read_csv(output)
+# Title and introduction
+st.title("🏠 Zillow Home Price Prediction")
+st.markdown("---")
 
-data = load_data()
+# Sidebar for user inputs
+with st.sidebar:
+    st.header("Analysis Parameters")
+    
+    # Data loading
+    file_id = "1wcabOuayxwGUzj_cd5k5fIboKFBce4yj"
+    download_url = f"https://drive.google.com/uc?id={file_id}"
 
-data.rename({"RegionName": "Zipcode"}, axis="columns", inplace=True)
+    @st.cache_data
+    def load_data():
+        output = "zillow_data.csv"
+        gdown.download(download_url, output, quiet=False)
+        return pd.read_csv(output)
 
-# Define a dictionary with city coordinates
-city_coordinates = {
+    data = load_data()
+    data.rename({"RegionName": "Zipcode"}, axis="columns", inplace=True)
+
+    # City selection
+    cities = data["City"].unique()
+    selected_city = st.selectbox("Select a City:", cities)
+    
+    # Filter data based on selected city
+    city_data = data.loc[data["City"] == selected_city]
+    
+    # Zipcode selection
+    zipcodes = city_data["Zipcode"].unique()
+    selected_zipcode = st.selectbox("Select a Zipcode:", zipcodes)
+    
+    # Prediction timeframe
+    n_years = st.slider("Prediction Timeframe (Years):", 1, 20, 5)
+    
+    # Event analysis
+    st.subheader("Event Analysis")
+    event_name = st.text_input("Hypothetical Event:", placeholder="e.g., New infrastructure project")
+    if event_name:
+        event_date = st.date_input("Event Date:")
+        event_impact = st.slider("Event Impact:", -100, 100, 0)
+
+# Main content area
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    # Market Overview Section
+    st.header("📊 Market Overview")
+    
+    # Data processing functions
+    def melt_data(df):
+        melted = pd.melt(df, id_vars=["RegionID", "Zipcode", "City", "State", "Metro", "CountyName", "SizeRank"], var_name="time")
+        melted["time"] = pd.to_datetime(melted["time"], infer_datetime_format=True)
+        melted = melted.dropna(subset=["value"])
+        return melted.groupby("time").aggregate({"value": "mean"}).reset_index()
+
+    # Process data
+    city_data_melted = melt_data(city_data)
+    zipcode_data_melted = melt_data(data.loc[data["Zipcode"] == selected_zipcode])
+
+    # Market Health Metrics
+    volatility = city_data_melted["value"].std()
+    roi = (city_data_melted["value"].iloc[-1] - city_data_melted["value"].iloc[0]) / city_data_melted["value"].iloc[0]
+    risk_score = (volatility * 0.6) + (roi * 0.4)
+
+    metric_col1, metric_col2, metric_col3 = st.columns(3)
+    metric_col1.metric("Market Volatility", f"{volatility:,.2f}")
+    metric_col2.metric("Return on Investment", f"{roi:.2%}")
+    metric_col3.metric("Risk Score", f"{risk_score:.2f}")
+
+with col2:
+    # Map visualization
+    st.header("🗺️ Geographic View")
+    
+    # City coordinates dictionary (your existing coordinates)
+    city_coordinates = {
     "New York": (40.7128, -74.0060),
     "San Francisco": (37.7749, -122.4194),
     "Los Angeles": (34.0522, -118.2437),
@@ -80,152 +159,91 @@ city_coordinates = {
     "Anaheim": (33.8366, -117.9143),
     "Tampa": (27.9506, -82.4572)
 }
+    
+    # Create map
+    coordinates = city_coordinates.get(selected_city)
+    if coordinates:
+        m = folium.Map(location=coordinates, zoom_start=11)
+        heatmap_data = []
+        for _, row in city_data.iterrows():
+            lat, lon = city_coordinates.get(row["City"], (None, None))
+            if lat is not None and lon is not None:
+                latest_value = row.iloc[-1]
+                heatmap_data.append([lat, lon, latest_value])
+        HeatMap(heatmap_data, radius=15).add_to(m)
+        folium_static(m)
 
-# Get list of unique cities
-cities = data["City"].unique()
-selected_city = st.selectbox("Select a city for prediction:", cities)
+# Price Analysis Section
+st.markdown("---")
+st.header("💰 Price Analysis")
+chart_col1, chart_col2 = st.columns(2)
 
-# Filter data based on selected city
-city_data = data.loc[data["City"] == selected_city]
+with chart_col1:
+    st.subheader(f"{selected_city} Price Trends")
+    fig_city = go.Figure()
+    fig_city.add_trace(go.Scatter(x=city_data_melted['time'], y=city_data_melted['value'], 
+                                 name='City Average', line_color="blue"))
+    fig_city.layout.update(title_text="City-wide Price Trends", xaxis_rangeslider_visible=True)
+    st.plotly_chart(fig_city, use_container_width=True)
 
-# Get list of unique zipcodes for the selected city
-zipcodes = city_data["Zipcode"].unique()
-selected_zipcode = st.selectbox("Select a zipcode for detailed analysis:", zipcodes)
+with chart_col2:
+    st.subheader(f"Zipcode {selected_zipcode} Price Trends")
+    fig_zip = go.Figure()
+    fig_zip.add_trace(go.Scatter(x=zipcode_data_melted['time'], y=zipcode_data_melted['value'], 
+                                name='Zipcode', line_color="red"))
+    fig_zip.layout.update(title_text="Zipcode Price Trends", xaxis_rangeslider_visible=True)
+    st.plotly_chart(fig_zip, use_container_width=True)
 
-# Filter data based on selected zipcode
-zipcode_data = city_data.loc[city_data["Zipcode"] == selected_zipcode]
+# Forecast Section
+st.markdown("---")
+st.header("🔮 Price Forecast")
 
-# Retrieve coordinates for the selected city from the dictionary
-coordinates = city_coordinates.get(selected_city, (None, None))
-
-# Create a folium map centered on the selected city
-if coordinates[0] is not None and coordinates[1] is not None:
-    m = folium.Map(location=coordinates, zoom_start=11)
-
-    # Prepare data for the heatmap
-    heatmap_data = []
-    for _, row in city_data.iterrows():
-        lat, lon = city_coordinates.get(row["City"], (None, None))
-        if lat is not None and lon is not None:
-            # Use the latest home value as the weight for the heatmap
-            latest_value = row.iloc[-1]  # Assuming the last column is the latest value
-            heatmap_data.append([lat, lon, latest_value])
-
-    # Add heatmap layer
-    HeatMap(heatmap_data, radius=15).add_to(m)
-
-    # Display the map
-    st.subheader(f"Heatmap of Home Prices in {selected_city}")
-    folium_static(m)
-else:
-    st.write("Coordinates not available for the selected city.")
-
-n_years = st.slider("Years of prediction:", 1, 20)
+# Prepare forecast data
 period = n_years * 365
-
-def melt_data(df):
-    melted = pd.melt(df, id_vars=["RegionID", "Zipcode", "City", "State", "Metro", "CountyName", "SizeRank"], var_name="time")
-    melted["time"] = pd.to_datetime(melted["time"], infer_datetime_format=True)
-    melted = melted.dropna(subset=["value"])
-    return melted.groupby("time").aggregate({"value": "mean"}).reset_index()
-
-data_load_state = st.text("Loading data...")
-city_data_melted = melt_data(city_data)
-zipcode_data_melted = melt_data(zipcode_data)
-data_load_state.text("Loading data...done!")
-
-st.subheader(f"Raw data for {selected_city}")
-st.write(city_data_melted.tail())
-
-st.subheader(f"Raw data for Zipcode {selected_zipcode}")
-st.write(zipcode_data_melted.tail())
-
-def plot_raw_data(df, title):
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df['time'], y=df['value'], name=title, line_color="red"))
-    fig.layout.update(title_text=title, width=600, height=600, xaxis_rangeslider_visible=True)
-    st.plotly_chart(fig)
-
-plot_raw_data(city_data_melted, f"{selected_city} Home Value Index")
-plot_raw_data(zipcode_data_melted, f"Zipcode {selected_zipcode} Home Value Index")
-
-# Calculate market health metrics
-volatility = city_data_melted["value"].std()
-roi = (city_data_melted["value"].iloc[-1] - city_data_melted["value"].iloc[0]) / city_data_melted["value"].iloc[0]
-risk_score = (volatility * 0.6) + (roi * 0.4)  # Example formula
-
-# Display metrics
-st.subheader("Market Health Dashboard")
-col1, col2, col3 = st.columns(3)
-col1.metric("Volatility", f"{volatility:.2f}")
-col2.metric("ROI", f"{roi:.2%}")
-col3.metric("Risk Score", f"{risk_score:.2f}")
-
-# Forecasting for the selected zipcode
-df_train = zipcode_data_melted[["time", "value"]]
-df_train = df_train.rename(columns={"time": "ds", "value": "y"})
-
+df_train = zipcode_data_melted[["time", "value"]].rename(columns={"time": "ds", "value": "y"})
 model = Prophet()
 model.fit(df_train)
 future = model.make_future_dataframe(periods=period)
-forecast = model.predict(future)
 
-# Add event-based regressors
-event_name = st.text_input("Add a hypothetical event (e.g., 'New infrastructure project'):")
+# Add event impact if specified
 if event_name:
-    event_date = st.date_input("Event date:")
-    event_impact = st.slider("Event impact (positive or negative):", -100, 100, 0)
-
-    # Convert event date to datetime
     event_date = pd.to_datetime(event_date)
-
-    # Validate event date range
-    if event_date < df_train["ds"].min() or event_date > df_train["ds"].max():
-        st.error(f"Event date must be between {df_train['ds'].min()} and {df_train['ds'].max()}.")
-    else:
-        # Add the event to the Prophet model
+    if event_date >= df_train["ds"].min() and event_date <= df_train["ds"].max():
         model.add_regressor(event_name)
         df_train[event_name] = 0
         df_train.loc[df_train["ds"] >= event_date, event_name] = event_impact
-
-        # Re-train the model
         model.fit(df_train)
-        future[event_name] = 0  # Add the event column to the future DataFrame
+        future[event_name] = 0
         future.loc[future["ds"] >= event_date, event_name] = event_impact
 
-        # Show updated forecast
-        forecast = model.predict(future)
-        st.subheader(f"Forecast with '{event_name}' Event")
-        st.write(forecast.tail(20))
+# Generate and display forecast
+forecast = model.predict(future)
+fig_forecast = plot_plotly(model, forecast)
+st.plotly_chart(fig_forecast, use_container_width=True)
 
-st.subheader(f"Forecast data for Zipcode {selected_zipcode}")
-st.write(forecast.tail(20))
+# Forecast components
+st.subheader("Forecast Components")
+fig_components = model.plot_components(forecast)
+st.write(fig_components)
 
-st.write("Forecast data")
-# Add annotations to the forecast plot
-fig1 = plot_plotly(model, forecast, figsize=(600, 600))
-fig1.add_annotation(
-    x="2025-01-01", y=forecast.loc[forecast["ds"] == "2025-01-01", "yhat"].values[0],
-    text="Peak in 2025 due to economic growth",
-    showarrow=True,
-    arrowhead=1,
-    ax=0,
-    ay=-40
-)
-st.plotly_chart(fig1)
-
-# Generate insights
+# Key Insights
+st.markdown("---")
+st.header("📈 Key Insights")
 growth_rate = (forecast["yhat"].iloc[-1] - forecast["yhat"].iloc[0]) / forecast["yhat"].iloc[0]
-insight_text = f"""
-- Home prices in {selected_city} are expected to grow by **{growth_rate:.2%}** over the next {n_years} years.
-- The market is currently **{'volatile' if volatility > 100 else 'stable'}**.
-- Zipcode {selected_zipcode} has shown **{'above-average' if roi > 0.1 else 'below-average'}** ROI compared to the city average.
-"""
+col_insights1, col_insights2 = st.columns(2)
 
-# Display insights
-st.subheader("Key Insights")
-st.markdown(insight_text)
+with col_insights1:
+    st.markdown(f"""
+    ### Market Trends
+    - Expected growth: **{growth_rate:.2%}** over {n_years} years
+    - Market volatility: **{'High' if volatility > 100 else 'Low'}**
+    - ROI performance: **{'Above' if roi > 0.1 else 'Below'}** average
+    """)
 
-st.write("Forecast components")
-fig2 = model.plot_components(forecast)
-st.write(fig2)
+with col_insights2:
+    st.markdown(f"""
+    ### Risk Assessment
+    - Risk level: **{'High' if risk_score > 50 else 'Moderate' if risk_score > 30 else 'Low'}**
+    - Market stability: **{'Volatile' if volatility > 100 else 'Stable'}**
+    - Investment outlook: **{'Favorable' if growth_rate > 0.1 else 'Moderate' if growth_rate > 0 else 'Cautious'}**
+    """)
