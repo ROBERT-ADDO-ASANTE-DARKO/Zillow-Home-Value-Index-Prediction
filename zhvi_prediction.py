@@ -9,13 +9,6 @@ import folium
 from streamlit_folium import folium_static
 from folium.plugins import HeatMap
 
-# Page configuration
-st.set_page_config(
-    page_title="Zillow Home Price Prediction",
-    page_icon="🏠",
-    layout="wide"
-)
-
 # Add custom CSS
 st.markdown("""
     <style>
@@ -43,7 +36,7 @@ st.markdown("""
 st.title("🏠 Zillow Home Price Prediction")
 st.markdown("---")
 
-# Sidebar for user inputs
+# Sidebar for user inputs and glossary
 with st.sidebar:
     st.header("Analysis Parameters")
     
@@ -80,6 +73,21 @@ with st.sidebar:
     if event_name:
         event_date = st.date_input("Event Date:")
         event_impact = st.slider("Event Impact:", -100, 100, 0)
+
+    # Glossary Section
+    st.markdown("---")
+    with st.expander("📖 Glossary of Terms"):
+        st.markdown("""
+            **Market Volatility**: A measure of how much home prices fluctuate over time. Higher volatility indicates greater price changes.
+            
+            **Return on Investment (ROI)**: The percentage increase in home prices over a specific period. It measures the profitability of an investment.
+            
+            **Risk Score**: A composite score that evaluates the risk level of investing in a particular market. It considers factors like volatility and ROI.
+            
+            **Forecast**: A prediction of future home prices based on historical data and trends.
+            
+            **Event Impact**: The effect of a hypothetical event (e.g., new infrastructure) on home prices. Positive impact increases prices, while negative impact decreases them.
+        """)
 
 # Market Overview Section
 st.markdown('<div class="market-overview">', unsafe_allow_html=True)
