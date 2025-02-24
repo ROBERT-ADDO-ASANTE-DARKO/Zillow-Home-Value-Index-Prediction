@@ -170,6 +170,25 @@ model.fit(df_train)
 future = model.make_future_dataframe(periods=period)
 forecast = model.predict(future)
 
+# Add event-based regressors
+event_name = st.text_input("Add a hypothetical event (e.g., 'New infrastructure project'):")
+if event_name:
+    event_date = st.date_input("Event date:")
+    event_impact = st.slider("Event impact (positive or negative):", -100, 100, 0)
+
+    # Add the event to the Prophet model
+    model.add_regressor(event_name)
+    df_train[event_name] = 0
+    df_train.loc[df_train["ds"] >= pd.to_datetime(event_date), event_name] = event_impact
+
+    # Re-train the model
+    model.fit(df_train)
+    forecast = model.predict(future)
+
+    # Show updated forecast
+    st.subheader(f"Forecast with '{event_name}' Event")
+    st.write(forecast.tail(20))
+
 st.subheader(f"Forecast data for Zipcode {selected_zipcode}")
 st.write(forecast.tail(20))
 
