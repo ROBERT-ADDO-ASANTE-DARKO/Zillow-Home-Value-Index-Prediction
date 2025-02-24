@@ -186,6 +186,18 @@ fig1.add_annotation(
 )
 st.plotly_chart(fig1)
 
+# Generate insights
+growth_rate = (forecast["yhat"].iloc[-1] - forecast["yhat"].iloc[0]) / forecast["yhat"].iloc[0]
+insight_text = f"""
+- Home prices in {selected_city} are expected to grow by **{growth_rate:.2%}** over the next {n_years} years.
+- The market is currently **{'volatile' if volatility > 100 else 'stable'}**.
+- Zipcode {selected_zipcode} has shown **{'above-average' if roi > 0.1 else 'below-average'}** ROI compared to the city average.
+"""
+
+# Display insights
+st.subheader("Key Insights")
+st.markdown(insight_text)
+
 st.write("Forecast components")
 fig2 = model.plot_components(forecast)
 st.write(fig2)
