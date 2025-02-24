@@ -87,6 +87,13 @@ selected_city = st.selectbox("Select a city for prediction:", cities)
 # Filter data based on selected city
 city_data = data.loc[data["City"] == selected_city]
 
+# Get list of unique zipcodes for the selected city
+zipcodes = city_data["Zipcode"].unique()
+selected_zipcode = st.selectbox("Select a zipcode for detailed analysis:", zipcodes)
+
+# Filter data based on selected zipcode
+zipcode_data = city_data.loc[city_data["Zipcode"] == selected_zipcode]
+
 # Retrieve coordinates for the selected city from the dictionary
 coordinates = city_coordinates.get(selected_city, (None, None))
 city_location = pd.DataFrame([coordinates], columns=['LAT', 'LON'])
@@ -109,21 +116,26 @@ def melt_data(df):
 
 data_load_state = st.text("Loading data...")
 city_data_melted = melt_data(city_data)
+zipcode_data_melted = melt_data(zipcode_data)
 data_load_state.text("Loading data...done!")
 
 st.subheader(f"Raw data for {selected_city}")
 st.write(city_data_melted.tail())
 
-def plot_raw_data():
+st.subheader(f"Raw data for Zipcode {selected_zipcode}")
+st.write(zipcode_data_melted.tail())
+
+def plot_raw_data(df, title):
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=city_data_melted['time'], y=city_data_melted['value'], name=selected_city, line_color="red"))
-    fig.layout.update(title_text=f"{selected_city} Home Value Index", width=600, height=600, xaxis_rangeslider_visible=True)
+    fig.add_trace(go.Scatter(x=df['time'], y=df['value'], name=title, line_color="red"))
+    fig.layout.update(title_text=title, width=600, height=600, xaxis_rangeslider_visible=True)
     st.plotly_chart(fig)
 
-plot_raw_data()
+plot_raw_data(city_data_melted, f"{selected_city} Home Value Index")
+plot_raw_data(zipcode_data_melted, f"Zipcode {selected_zipcode} Home Value Index")
 
-# Forecasting
-df_train = city_data_melted[["time", "value"]]
+# Forecasting for the selected zipcode
+df_train = zipcode_data_melted[["time", "value"]]
 df_train = df_train.rename(columns={"time": "ds", "value": "y"})
 
 model = Prophet()
@@ -131,7 +143,7 @@ model.fit(df_train)
 future = model.make_future_dataframe(periods=period)
 forecast = model.predict(future)
 
-st.subheader("Forecast data")
+st.subheader(f"Forecast data for Zipcode {selected_zipcode}")
 st.write(forecast.tail(20))
 
 st.write("Forecast data")
