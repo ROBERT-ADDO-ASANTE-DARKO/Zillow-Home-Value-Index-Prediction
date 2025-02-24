@@ -27,6 +27,9 @@ st.markdown("""
         padding: 1rem;
         border-radius: 0.5rem;
     }
+    .market-overview {
+        color: black !important;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -72,40 +75,38 @@ with st.sidebar:
         event_date = st.date_input("Event Date:")
         event_impact = st.slider("Event Impact:", -100, 100, 0)
 
-# Main content area
-col1, col2 = st.columns([2, 1])
+# Market Overview Section
+st.markdown('<div class="market-overview">', unsafe_allow_html=True)
+st.header("📊 Market Overview")
 
-with col1:
-    # Market Overview Section
-    st.header("📊 Market Overview")
-    
-    # Data processing functions
-    def melt_data(df):
-        melted = pd.melt(df, id_vars=["RegionID", "Zipcode", "City", "State", "Metro", "CountyName", "SizeRank"], var_name="time")
-        melted["time"] = pd.to_datetime(melted["time"], infer_datetime_format=True)
-        melted = melted.dropna(subset=["value"])
-        return melted.groupby("time").aggregate({"value": "mean"}).reset_index()
+# Data processing functions
+def melt_data(df):
+    melted = pd.melt(df, id_vars=["RegionID", "Zipcode", "City", "State", "Metro", "CountyName", "SizeRank"], var_name="time")
+    melted["time"] = pd.to_datetime(melted["time"], infer_datetime_format=True)
+    melted = melted.dropna(subset=["value"])
+    return melted.groupby("time").aggregate({"value": "mean"}).reset_index()
 
-    # Process data
-    city_data_melted = melt_data(city_data)
-    zipcode_data_melted = melt_data(data.loc[data["Zipcode"] == selected_zipcode])
+# Process data
+city_data_melted = melt_data(city_data)
+zipcode_data_melted = melt_data(data.loc[data["Zipcode"] == selected_zipcode])
 
-    # Market Health Metrics
-    volatility = city_data_melted["value"].std()
-    roi = (city_data_melted["value"].iloc[-1] - city_data_melted["value"].iloc[0]) / city_data_melted["value"].iloc[0]
-    risk_score = (volatility * 0.6) + (roi * 0.4)
+# Market Health Metrics
+volatility = city_data_melted["value"].std()
+roi = (city_data_melted["value"].iloc[-1] - city_data_melted["value"].iloc[0]) / city_data_melted["value"].iloc[0]
+risk_score = (volatility * 0.6) + (roi * 0.4)
 
-    metric_col1, metric_col2, metric_col3 = st.columns(3)
-    metric_col1.metric("Market Volatility", f"{volatility:,.2f}")
-    metric_col2.metric("Return on Investment", f"{roi:.2%}")
-    metric_col3.metric("Risk Score", f"{risk_score:.2f}")
+metric_col1, metric_col2, metric_col3 = st.columns(3)
+metric_col1.metric("Market Volatility", f"{volatility:,.2f}")
+metric_col2.metric("Return on Investment", f"{roi:.2%}")
+metric_col3.metric("Risk Score", f"{risk_score:.2f}")
+st.markdown('</div>', unsafe_allow_html=True)
 
-with col2:
-    # Map visualization
-    st.header("🗺️ Geographic View")
-    
-    # City coordinates dictionary (your existing coordinates)
-    city_coordinates = {
+# Map visualization
+st.markdown("---")
+st.header("🗺️ Geographic View")
+
+# City coordinates dictionary (your existing coordinates)
+city_coordinates = {
     "New York": (40.7128, -74.0060),
     "San Francisco": (37.7749, -122.4194),
     "Los Angeles": (34.0522, -118.2437),
@@ -159,19 +160,19 @@ with col2:
     "Anaheim": (33.8366, -117.9143),
     "Tampa": (27.9506, -82.4572)
 }
-    
-    # Create map
-    coordinates = city_coordinates.get(selected_city)
-    if coordinates:
-        m = folium.Map(location=coordinates, zoom_start=11)
-        heatmap_data = []
-        for _, row in city_data.iterrows():
-            lat, lon = city_coordinates.get(row["City"], (None, None))
-            if lat is not None and lon is not None:
-                latest_value = row.iloc[-1]
-                heatmap_data.append([lat, lon, latest_value])
-        HeatMap(heatmap_data, radius=15).add_to(m)
-        folium_static(m)
+
+# Create map
+coordinates = city_coordinates.get(selected_city)
+if coordinates:
+    m = folium.Map(location=coordinates, zoom_start=11)
+    heatmap_data = []
+    for _, row in city_data.iterrows():
+        lat, lon = city_coordinates.get(row["City"], (None, None))
+        if lat is not None and lon is not None:
+            latest_value = row.iloc[-1]
+            heatmap_data.append([lat, lon, latest_value])
+    HeatMap(heatmap_data, radius=15).add_to(m)
+    folium_static(m, width=800)
 
 # Price Analysis Section
 st.markdown("---")
