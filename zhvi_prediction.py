@@ -162,7 +162,16 @@ st.subheader(f"Forecast data for Zipcode {selected_zipcode}")
 st.write(forecast.tail(20))
 
 st.write("Forecast data")
+# Add annotations to the forecast plot
 fig1 = plot_plotly(model, forecast, figsize=(600, 600))
+fig1.add_annotation(
+    x="2025-01-01", y=forecast.loc[forecast["ds"] == "2025-01-01", "yhat"].values[0],
+    text="Peak in 2025 due to economic growth",
+    showarrow=True,
+    arrowhead=1,
+    ax=0,
+    ay=-40
+)
 st.plotly_chart(fig1)
 
 st.write("Forecast components")
