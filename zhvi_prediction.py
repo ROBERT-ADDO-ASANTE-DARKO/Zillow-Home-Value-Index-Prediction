@@ -28,7 +28,7 @@ st.markdown("""
         border-radius: 0.5rem;
     }
     .market-overview {
-        color: black !important;
+        font-color: black !important;
     }
     </style>
     """, unsafe_allow_html=True)
