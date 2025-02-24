@@ -5,6 +5,9 @@ from prophet.plot import plot_plotly
 from plotly import graph_objs as go
 import pandas as pd
 import gdown
+import folium
+from streamlit_folium import folium_static
+from folium.plugins import HeatMap
 
 st.title("Zillow Home Prediction App")
 
@@ -42,8 +45,6 @@ city_coordinates = {
     "Columbus": (39.9612, -82.9988),
     "Indianapolis": (39.7684, -86.1581),
     "Charlotte": (35.2271, -80.8431),
-    "San Francisco": (37.7749, -122.4194),
-    "Seattle": (47.6062, -122.3321),
     "Denver": (39.7392, -104.9903),
     "Washington": (38.8951, -77.0369),
     "Boston": (42.3601, -71.0589),
@@ -96,14 +97,28 @@ zipcode_data = city_data.loc[city_data["Zipcode"] == selected_zipcode]
 
 # Retrieve coordinates for the selected city from the dictionary
 coordinates = city_coordinates.get(selected_city, (None, None))
-city_location = pd.DataFrame([coordinates], columns=['LAT', 'LON'])
 
-# Display map
-st.subheader(f"Map for {selected_city}")
-if coordinates[0] is None or coordinates[1] is None:
-    st.write("Coordinates not available for the selected city.")
+# Create a folium map centered on the selected city
+if coordinates[0] is not None and coordinates[1] is not None:
+    m = folium.Map(location=coordinates, zoom_start=11)
+
+    # Prepare data for the heatmap
+    heatmap_data = []
+    for _, row in city_data.iterrows():
+        lat, lon = city_coordinates.get(row["City"], (None, None))
+        if lat is not None and lon is not None:
+            # Use the latest home value as the weight for the heatmap
+            latest_value = row.iloc[-1]  # Assuming the last column is the latest value
+            heatmap_data.append([lat, lon, latest_value])
+
+    # Add heatmap layer
+    HeatMap(heatmap_data, radius=15).add_to(m)
+
+    # Display the map
+    st.subheader(f"Heatmap of Home Prices in {selected_city}")
+    folium_static(m)
 else:
-    st.map(city_location)
+    st.write("Coordinates not available for the selected city.")
 
 n_years = st.slider("Years of prediction:", 1, 20)
 period = n_years * 365
