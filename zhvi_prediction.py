@@ -27,8 +27,14 @@ st.markdown("""
         padding: 1rem;
         border-radius: 0.5rem;
     }
+    .stMetric label {
+        color: black !important;  /* Metric label color */
+    }
+    .stMetric div {
+        color: black !important;  /* Metric value color */
+    }
     .market-overview {
-        font-color: black !important;
+        color: black !important;
     }
     </style>
     """, unsafe_allow_html=True)
