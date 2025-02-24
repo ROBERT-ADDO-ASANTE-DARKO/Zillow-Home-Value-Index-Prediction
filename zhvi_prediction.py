@@ -176,18 +176,27 @@ if event_name:
     event_date = st.date_input("Event date:")
     event_impact = st.slider("Event impact (positive or negative):", -100, 100, 0)
 
-    # Add the event to the Prophet model
-    model.add_regressor(event_name)
-    df_train[event_name] = 0
-    df_train.loc[df_train["ds"] >= pd.to_datetime(event_date), event_name] = event_impact
+    # Convert event date to datetime
+    event_date = pd.to_datetime(event_date)
 
-    # Re-train the model
-    model.fit(df_train)
-    forecast = model.predict(future)
+    # Validate event date range
+    if event_date < df_train["ds"].min() or event_date > df_train["ds"].max():
+        st.error(f"Event date must be between {df_train['ds'].min()} and {df_train['ds'].max()}.")
+    else:
+        # Add the event to the Prophet model
+        model.add_regressor(event_name)
+        df_train[event_name] = 0
+        df_train.loc[df_train["ds"] >= event_date, event_name] = event_impact
 
-    # Show updated forecast
-    st.subheader(f"Forecast with '{event_name}' Event")
-    st.write(forecast.tail(20))
+        # Re-train the model
+        model.fit(df_train)
+        future[event_name] = 0  # Add the event column to the future DataFrame
+        future.loc[future["ds"] >= event_date, event_name] = event_impact
+
+        # Show updated forecast
+        forecast = model.predict(future)
+        st.subheader(f"Forecast with '{event_name}' Event")
+        st.write(forecast.tail(20))
 
 st.subheader(f"Forecast data for Zipcode {selected_zipcode}")
 st.write(forecast.tail(20))
