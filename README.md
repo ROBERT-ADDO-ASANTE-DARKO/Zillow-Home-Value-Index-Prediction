@@ -81,7 +81,8 @@ streamlit run zhvi_prediction.py
 | Home Page | Forecast Results | Market Health Dashboard |
 |-----------|------------------|-------------------------|
 | ![Screenshot 2025-02-25 001006](https://github.com/user-attachments/assets/1f5ca6fa-c79f-4cd3-84a8-f6fa83de7db5)
-| ![Screenshot 2025-02-05 023106](https://github.com/user-attachments/assets/13dc4588-68aa-47f5-8e94-42aa8f35f33f) | ![Screenshot 2025-02-25 001139](https://github.com/user-attachments/assets/0ab76e61-0378-4e2c-9359-f7dd13ae59a4)
+| ![Screenshot 2025-02-25 001103](https://github.com/user-attachments/assets/d5eeda5b-ac5f-46b5-aab8-d865f1cedf82)
+| ![Screenshot 2025-02-25 001139](https://github.com/user-attachments/assets/0ab76e61-0378-4e2c-9359-f7dd13ae59a4)
 |
 
 ---
