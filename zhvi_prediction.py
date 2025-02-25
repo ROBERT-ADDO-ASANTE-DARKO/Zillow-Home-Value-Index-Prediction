@@ -233,7 +233,7 @@ if coordinates:
     
     # Display the map
     st.subheader(f"Home Prices in {selected_city} by Zip Code")
-    folium_static(m, width=800)
+    folium_static(m)
 else:
     st.write("Coordinates not available for the selected city.")
 
