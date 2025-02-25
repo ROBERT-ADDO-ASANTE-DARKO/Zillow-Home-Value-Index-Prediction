@@ -9,6 +9,21 @@ import folium
 from streamlit_folium import folium_static
 from folium.plugins import HeatMap
 import random
+from geopy.geocoders import Nominatim
+from geopy.exc import GeocoderTimedOut
+import time
+
+# Function to get coordinates
+def get_coordinates(zipcode):
+    geolocator = Nominatim(user_agent="geoapiExercises")
+    try:
+        location = geolocator.geocode({"postalcode": zipcode, "country": "USA"}, timeout=10)
+        if location:
+            return location.latitude, location.longitude
+    except GeocoderTimedOut:
+        time.sleep(1)
+        return get_coordinates(zipcode)
+    return None, None
 
 # Add custom CSS
 st.markdown("""
