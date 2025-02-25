@@ -8,6 +8,7 @@ import gdown
 import folium
 from streamlit_folium import folium_static
 from folium.plugins import HeatMap
+import random
 
 # Add custom CSS
 st.markdown("""
