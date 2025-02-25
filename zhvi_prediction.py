@@ -176,6 +176,9 @@ city_coordinates = {
     "Tampa": (27.9506, -82.4572)
 }
 
+# Retrieve coordinates for the selected city
+coordinates = city_coordinates.get(selected_city)
+
 # Create a Folium map centered on the selected city
 if coordinates:
     m = folium.Map(location=coordinates, zoom_start=12)
