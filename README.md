@@ -136,7 +136,3 @@ This project is open-source and available under the **MIT License**.
 
 ## 📬 Contact
 For any questions or collaboration opportunities, reach out via **[LinkedIn](https://www.linkedin.com/in/robert-agyekum-addo-3597461b4)**.
-
----
-
-This updated README provides a comprehensive overview of the app, its features, and its potential impact. It also highlights the model, dataset, and future improvements to attract users and contributors. Let me know if you need further refinements!
