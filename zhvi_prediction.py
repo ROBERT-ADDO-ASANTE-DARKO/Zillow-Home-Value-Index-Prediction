@@ -8,6 +8,8 @@ import gdown
 import folium
 from streamlit_folium import folium_static
 from folium.plugins import HeatMap
+from geopy.geocoders import Nominatim
+from geopy.extra.rate_limiter import RateLimiter
 import random
 
 # Add custom CSS
