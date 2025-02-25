@@ -54,6 +54,28 @@ with st.sidebar:
     data = load_data()
     data.rename({"RegionName": "Zipcode"}, axis="columns", inplace=True)
 
+    # Add latitude and longitude columns if they don't exist
+    if "Lat" not in data.columns or "Lon" not in data.columns:
+        st.write("Retrieving coordinates for zip codes... This may take a few minutes.")
+        geolocator = Nominatim(user_agent="zillow_app")
+        geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1)  # Add rate limiting to avoid API timeouts
+
+        def get_coordinates(zipcode):
+            try:
+                location = geocode(f"{zipcode}, USA")
+                if location:
+                    return location.latitude, location.longitude
+            except:
+                return None, None
+
+        data[["Lat", "Lon"]] = data["Zipcode"].apply(lambda x: pd.Series(get_coordinates(x)))
+
+        # Save the updated dataset with coordinates
+        data.to_csv("zillow_data_with_coords.csv", index=False)
+        st.write("Coordinates retrieved and saved!")
+    else:
+        st.write("Coordinates already available in the dataset.")
+
     # City selection
     cities = data["City"].unique()
     selected_city = st.selectbox("Select a City:", cities)
@@ -176,31 +198,32 @@ city_coordinates = {
     "Tampa": (27.9506, -82.4572)
 }
 
-# Retrieve coordinates for the selected city
-coordinates = city_coordinates.get(selected_city)
+# Create map
+if "Lat" in data.columns and "Lon" in data.columns:
+    coordinates = (city_data["Lat"].mean(), city_data["Lon"].mean())  # Center map on the city
+    m = folium.Map(location=coordinates, zoom_start=11)
 
-# Create a Folium map centered on the selected city
-if coordinates:
-    m = folium.Map(location=coordinates, zoom_start=12)
-
-    # Add heatmap layer for home prices
+    # Prepare heatmap data for all zipcodes in the city
     heatmap_data = []
     for _, row in city_data.iterrows():
-        lat, lon = city_coordinates.get(row["City"], (None, None))
-        if lat is not None and lon is not None:
-            latest_value = row.iloc[-1]  # Use the latest home value
+        lat, lon = row["Lat"], row["Lon"]
+        if pd.notna(lat) and pd.notna(lon):
+            latest_value = row.iloc[-2]  # Use the latest home value (adjust column index as needed)
             heatmap_data.append([lat, lon, latest_value])
+
+    # Add heatmap layer
     HeatMap(heatmap_data, radius=15).add_to(m)
 
     # Add markers for each zipcode
     for _, row in city_data.iterrows():
-        lat, lon = city_coordinates.get(row["City"], (None, None))
-        if lat is not None and lon is not None:
+        lat, lon = row["Lat"], row["Lon"]
+        if pd.notna(lat) and pd.notna(lon):
             # Add a marker for the zipcode
             folium.Marker(
                 location=[lat, lon],
-                popup=f"Zipcode: {row['Zipcode']}<br>Latest Value: ${row.iloc[-1]:,.2f}",
+                popup=f"Zipcode: {row['Zipcode']}<br>Latest Value: ${row.iloc[-2]:,.2f}",
                 tooltip=f"Zipcode: {row['Zipcode']}",
+                icon=folium.Icon(color="blue", icon="home"),  # Custom icon
             ).add_to(m)
 
     # Display the map
