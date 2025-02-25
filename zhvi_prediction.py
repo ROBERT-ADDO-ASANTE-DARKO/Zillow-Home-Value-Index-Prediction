@@ -180,60 +180,14 @@ city_coordinates = {
 coordinates = city_coordinates.get(selected_city)
 if coordinates:
     m = folium.Map(location=coordinates, zoom_start=11)
-    
-    # Add markers for each zipcode in the city
-    for _, row in city_data.drop_duplicates('Zipcode').iterrows():
-        # Use the city coordinates as a base
-        lat, lon = coordinates
-        
-        # Add a small random offset to spread out markers
-        lat_offset = random.uniform(-0.03, 0.03)
-        lon_offset = random.uniform(-0.03, 0.03)
-        
-        # Get the latest home value for this zipcode
-        latest_columns = [col for col in data.columns if col not in ["RegionID", "Zipcode", "City", "State", "Metro", "CountyName", "SizeRank"]]
-        latest_column = sorted(latest_columns)[-1]
-        zipcode_latest_value = data.loc[data['Zipcode'] == row['Zipcode'], latest_column].values[0]
-        
-        # Create popup content
-        popup_content = f"""
-        <div style="font-family: Arial, sans-serif;">
-            <h4>Zipcode: {row['Zipcode']}</h4>
-            <p><b>Latest Home Value:</b> ${zipcode_latest_value:,.2f}</p>
-            <p><b>City:</b> {row['City']}</p>
-            <p><b>State:</b> {row['State']}</p>
-        </div>
-        """
-        
-        # Highlight the selected zipcode
-        icon_color = 'red' if row['Zipcode'] == selected_zipcode else 'blue'
-        
-        # Add marker with popup
-        folium.Marker(
-            location=[lat + lat_offset, lon + lon_offset],
-            popup=folium.Popup(popup_content, max_width=300),
-            tooltip=f"Zipcode: {row['Zipcode']}",
-            icon=folium.Icon(color=icon_color, icon='home', prefix='fa')
-        ).add_to(m)
-    
-    # Then add the heatmap
     heatmap_data = []
     for _, row in city_data.iterrows():
-        lat, lon = coordinates  # Using city coordinates 
+        lat, lon = city_coordinates.get(row["City"], (None, None))
         if lat is not None and lon is not None:
-            latest_value = row.iloc[-1]  # Get the latest value
+            latest_value = row.iloc[-1]
             heatmap_data.append([lat, lon, latest_value])
-    
-    HeatMap(heatmap_data, radius=15, blur=10, gradient={
-        0.2: 'blue', 0.4: 'lime', 0.6: 'yellow', 0.8: 'orange', 1.0: 'red'
-    }).add_to(m)
-    
-    # Add map controls
-    folium.LayerControl().add_to(m)
-    
-    # Display the map
-    st.subheader(f"Home Prices in {selected_city} by Zip Code")
-    folium_static(m)
+    HeatMap(heatmap_data, radius=15).add_to(m)
+    folium_static(m, width=800)
 else:
     st.write("Coordinates not available for the selected city.")
 
