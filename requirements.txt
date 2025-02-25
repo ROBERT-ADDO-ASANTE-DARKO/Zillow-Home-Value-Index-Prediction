@@ -5,3 +5,4 @@ pandas
 gdown
 folium
 streamlit-folium
+geopy
