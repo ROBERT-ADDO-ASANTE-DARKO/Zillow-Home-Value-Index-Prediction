@@ -9,21 +9,6 @@ import folium
 from streamlit_folium import folium_static
 from folium.plugins import HeatMap
 import random
-from geopy.geocoders import Nominatim
-from geopy.exc import GeocoderTimedOut
-import time
-
-# Function to get coordinates
-def get_coordinates(zipcode):
-    geolocator = Nominatim(user_agent="geoapiExercises")
-    try:
-        location = geolocator.geocode({"postalcode": zipcode, "country": "USA"}, timeout=10)
-        if location:
-            return location.latitude, location.longitude
-    except GeocoderTimedOut:
-        time.sleep(1)
-        return get_coordinates(zipcode)
-    return None, None
 
 # Add custom CSS
 st.markdown("""
@@ -69,20 +54,16 @@ with st.sidebar:
     data = load_data()
     data.rename({"RegionName": "Zipcode"}, axis="columns", inplace=True)
 
-    # Add coordinates if missing
-    if "Latitude" not in data.columns or "Longitude" not in data.columns:
-        data["Latitude"], data["Longitude"] = zip(*data["Zipcode"].apply(lambda x: get_coordinates(str(x))))
-        data.to_csv("zillow_data_with_coords.csv", index=False)
-    
-    # Sidebar
-    st.sidebar.header("Analysis Parameters")
+    # City selection
     cities = data["City"].unique()
-    selected_city = st.sidebar.selectbox("Select a City:", cities)
+    selected_city = st.selectbox("Select a City:", cities)
     
     # Filter data based on selected city
-    city_data = data[data["City"] == selected_city]
+    city_data = data.loc[data["City"] == selected_city]
+    
+    # Zipcode selection
     zipcodes = city_data["Zipcode"].unique()
-    selected_zipcode = st.sidebar.selectbox("Select a Zipcode:", zipcodes)
+    selected_zipcode = st.selectbox("Select a Zipcode:", zipcodes)
     
     # Prediction timeframe
     n_years = st.slider("Prediction Timeframe (Years):", 1, 20, 5)
@@ -136,22 +117,125 @@ metric_col3.metric("Risk Score", f"{risk_score:.2f}")
 st.markdown('</div>', unsafe_allow_html=True)
 
 # Map visualization
-st.header("🗺️ Zip Code Map")
-m = folium.Map(location=[city_data["Latitude"].mean(), city_data["Longitude"].mean()], zoom_start=12)
+st.markdown("---")
+st.header("🗺️ Geographic View")
 
-# Add heatmap
-heatmap_data = city_data.dropna(subset=["Latitude", "Longitude", "value"])
-HeatMap(heatmap_data[["Latitude", "Longitude", "value"]].values, radius=15).add_to(m)
+# City coordinates dictionary (your existing coordinates)
+city_coordinates = {
+    "New York": (40.7128, -74.0060),
+    "San Francisco": (37.7749, -122.4194),
+    "Los Angeles": (34.0522, -118.2437),
+    "Seattle": (47.6062, -122.3321),
+    "Chicago": (41.8781, -87.6298),
+    "Houston": (29.7604, -95.3698),
+    "Philadelphia": (39.9526, -75.1652),
+    "Phoenix": (33.4484, -112.0740),
+    "San Antonio": (29.4241, -98.4936),
+    "San Diego": (32.7157, -117.1611),
+    "Dallas": (32.7767, -96.7970),
+    "San Jose": (37.3382, -121.8863),
+    "Austin": (30.2672, -97.7431),
+    "Jacksonville": (30.3322, -81.6557),
+    "Fort Worth": (32.7555, -97.3331),
+    "Columbus": (39.9612, -82.9988),
+    "Indianapolis": (39.7684, -86.1581),
+    "Charlotte": (35.2271, -80.8431),
+    "Denver": (39.7392, -104.9903),
+    "Washington": (38.8951, -77.0369),
+    "Boston": (42.3601, -71.0589),
+    "El Paso": (31.7619, -106.4850),
+    "Detroit": (42.3314, -83.0458),
+    "Nashville": (36.1627, -86.7816),
+    "Baltimore": (39.2904, -76.6122),
+    "Oklahoma City": (35.4676, -97.5164),
+    "Las Vegas": (36.1699, -115.1398),
+    "Louisville": (38.2527, -85.7585),
+    "Milwaukee": (43.0389, -87.9065),
+    "Albuquerque": (35.0844, -106.6504),
+    "Tucson": (32.2226, -110.9747),
+    "Fresno": (36.7378, -119.7871),
+    "Sacramento": (38.58, -121.49),
+    "Kansas City": (39.0997, -94.5786),
+    "Mesa": (33.4152, -111.8315),
+    "Virginia Beach": (36.8529, -75.9780),
+    "Atlanta": (33.7490, -84.3880),
+    "Colorado Springs": (38.8339, -104.8214),
+    "Omaha": (41.2565, -95.9345),
+    "Raleigh": (35.7796, -78.6382),
+    "Miami": (25.7617, -80.1918),
+    "Cleveland": (41.4993, -81.6944),
+    "Tulsa": (36.1540, -95.9928),
+    "Oakland": (37.8049, -122.2711),
+    "Minneapolis": (44.9778, -93.2650),
+    "Wichita": (37.6872, -97.3301),
+    "Arlington": (32.7357, -97.1081),
+    "Bakersfield": (35.3733, -119.0187),
+    "New Orleans": (29.9511, -90.0715),
+    "Honolulu": (21.3069, -157.8583),
+    "Anaheim": (33.8366, -117.9143),
+    "Tampa": (27.9506, -82.4572)
+}
 
-# Add markers
-for _, row in heatmap_data.iterrows():
-    folium.Marker(
-        location=[row["Latitude"], row["Longitude"]],
-        popup=f"Zipcode: {row['Zipcode']}<br>Latest Value: ${row.iloc[-1]:,.2f}",
-        tooltip=f"Zipcode: {row['Zipcode']}"
-    ).add_to(m)
-
-folium_static(m, width=800)
+# Create map
+coordinates = city_coordinates.get(selected_city)
+if coordinates:
+    m = folium.Map(location=coordinates, zoom_start=11)
+    
+    # Add markers for each zipcode in the city
+    for _, row in city_data.drop_duplicates('Zipcode').iterrows():
+        # Use the city coordinates as a base
+        lat, lon = coordinates
+        
+        # Add a small random offset to spread out markers
+        lat_offset = random.uniform(-0.03, 0.03)
+        lon_offset = random.uniform(-0.03, 0.03)
+        
+        # Get the latest home value for this zipcode
+        latest_columns = [col for col in data.columns if col not in ["RegionID", "Zipcode", "City", "State", "Metro", "CountyName", "SizeRank"]]
+        latest_column = sorted(latest_columns)[-1]
+        zipcode_latest_value = data.loc[data['Zipcode'] == row['Zipcode'], latest_column].values[0]
+        
+        # Create popup content
+        popup_content = f"""
+        <div style="font-family: Arial, sans-serif;">
+            <h4>Zipcode: {row['Zipcode']}</h4>
+            <p><b>Latest Home Value:</b> ${zipcode_latest_value:,.2f}</p>
+            <p><b>City:</b> {row['City']}</p>
+            <p><b>State:</b> {row['State']}</p>
+        </div>
+        """
+        
+        # Highlight the selected zipcode
+        icon_color = 'red' if row['Zipcode'] == selected_zipcode else 'blue'
+        
+        # Add marker with popup
+        folium.Marker(
+            location=[lat + lat_offset, lon + lon_offset],
+            popup=folium.Popup(popup_content, max_width=300),
+            tooltip=f"Zipcode: {row['Zipcode']}",
+            icon=folium.Icon(color=icon_color, icon='home', prefix='fa')
+        ).add_to(m)
+    
+    # Then add the heatmap
+    heatmap_data = []
+    for _, row in city_data.iterrows():
+        lat, lon = coordinates  # Using city coordinates 
+        if lat is not None and lon is not None:
+            latest_value = row.iloc[-1]  # Get the latest value
+            heatmap_data.append([lat, lon, latest_value])
+    
+    HeatMap(heatmap_data, radius=15, blur=10, gradient={
+        0.2: 'blue', 0.4: 'lime', 0.6: 'yellow', 0.8: 'orange', 1.0: 'red'
+    }).add_to(m)
+    
+    # Add map controls
+    folium.LayerControl().add_to(m)
+    
+    # Display the map
+    st.subheader(f"Home Prices in {selected_city} by Zip Code")
+    folium_static(m, width=800)
+else:
+    st.write("Coordinates not available for the selected city.")
 
 # Price Analysis Section
 st.markdown("---")
