@@ -176,17 +176,32 @@ city_coordinates = {
     "Tampa": (27.9506, -82.4572)
 }
 
-# Create map
-coordinates = city_coordinates.get(selected_city)
+# Create a Folium map centered on the selected city
 if coordinates:
-    m = folium.Map(location=coordinates, zoom_start=11)
+    m = folium.Map(location=coordinates, zoom_start=12)
+
+    # Add heatmap layer for home prices
     heatmap_data = []
     for _, row in city_data.iterrows():
         lat, lon = city_coordinates.get(row["City"], (None, None))
         if lat is not None and lon is not None:
-            latest_value = row.iloc[-1]
+            latest_value = row.iloc[-1]  # Use the latest home value
             heatmap_data.append([lat, lon, latest_value])
     HeatMap(heatmap_data, radius=15).add_to(m)
+
+    # Add markers for each zipcode
+    for _, row in city_data.iterrows():
+        lat, lon = city_coordinates.get(row["City"], (None, None))
+        if lat is not None and lon is not None:
+            # Add a marker for the zipcode
+            folium.Marker(
+                location=[lat, lon],
+                popup=f"Zipcode: {row['Zipcode']}<br>Latest Value: ${row.iloc[-1]:,.2f}",
+                tooltip=f"Zipcode: {row['Zipcode']}",
+            ).add_to(m)
+
+    # Display the map
+    st.subheader(f"Map for {selected_city} with Zipcodes")
     folium_static(m, width=800)
 else:
     st.write("Coordinates not available for the selected city.")
