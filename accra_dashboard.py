@@ -104,34 +104,34 @@ BASE_LAYOUT = dict(
     hovermode="x unified",
     hoverlabel=dict(bgcolor=C["hover"], font_color=C["text"],
                     bordercolor=C["border"], namelength=-1),
-    legend=dict(bgcolor="rgba(0,0,0,0)", bordercolor=C["border"],
-                borderwidth=1, font_size=10),
-    xaxis=dict(showgrid=False, linecolor=C["border"],
-               tickcolor=C["muted"], tickfont=dict(size=10)),
-    yaxis=dict(showgrid=True, gridcolor=C["border"],
-               linecolor=C["border"], tickfont=dict(size=10)),
 )
+
+# Axis / legend defaults kept separate so figure builders can extend them
+# without triggering duplicate-keyword errors when spreading BASE_LAYOUT.
+BASE_XAXIS  = dict(showgrid=False, linecolor=C["border"],
+                   tickcolor=C["muted"], tickfont=dict(size=10))
+BASE_YAXIS  = dict(showgrid=True, gridcolor=C["border"],
+                   linecolor=C["border"], tickfont=dict(size=10))
+BASE_LEGEND = dict(bgcolor="rgba(0,0,0,0)", bordercolor=C["border"],
+                   borderwidth=1, font_size=10)
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 def filter_df(start_yr, end_yr):
     return DF[(DF["ds"].dt.year >= start_yr) & (DF["ds"].dt.year <= end_yr)].copy()
 
 
-def add_event_lines(fig, dff, row=1, col=1):
-    """Add vertical event annotation lines to a figure."""
+def add_event_lines(fig, dff):
+    """Add vertical event annotation lines to a plain (non-subplots) figure."""
     for date_str, label, pos in KEY_EVENTS:
         dt = pd.Timestamp(date_str)
         if dt < dff["ds"].min() or dt > dff["ds"].max():
             continue
-        idx   = dff["ds"].searchsorted(dt)
-        y_val = float(dff["y"].iloc[max(0, min(idx, len(dff) - 1))])
-        ypos  = 1.02 if pos == "above" else -0.06
+        ypos = 1.02 if pos == "above" else -0.06
         fig.add_vline(
             x=dt.timestamp() * 1000,
             line_width=1, line_dash="dot",
             line_color=C["muted"],
             opacity=0.5,
-            row=row, col=col,
         )
         fig.add_annotation(
             x=dt, y=ypos,
@@ -145,7 +145,6 @@ def add_event_lines(fig, dff, row=1, col=1):
             borderwidth=1,
             borderpad=3,
             opacity=0.88,
-            row=row, col=col,
         )
     return fig
 
@@ -203,21 +202,20 @@ def build_ahpi_fig(dff, overlays, show_events):
         ))
 
     fig.update_layout(
-        **BASE_LAYOUT,
+        BASE_LAYOUT,
+        xaxis=BASE_XAXIS,
+        yaxis=dict(**BASE_YAXIS, title="Index (2015 = 100)"),
+        yaxis2=dict(title=dict(text="GHS / sqm", font=dict(color=C["green"])),
+                    overlaying="y", side="right",
+                    showgrid=False, tickformat=",",
+                    tickfont=dict(color=C["green"], size=10)),
+        yaxis3=dict(title=dict(text="USD / sqm", font=dict(color=C["blue"])),
+                    overlaying="y", side="right",
+                    anchor="free", position=0.97, showgrid=False,
+                    tickfont=dict(color=C["blue"], size=10)),
+        legend=dict(**BASE_LEGEND, orientation="h", x=0.01, y=1.06),
         title=dict(text="<b>Accra Home Price Index</b>  (GHS-denominated, base 2015 = 100)",
                    font_size=14, x=0.01),
-        yaxis=dict(**BASE_LAYOUT["yaxis"], title="Index (2015 = 100)"),
-        yaxis2=dict(title="GHS / sqm", overlaying="y", side="right",
-                    showgrid=False, tickformat=",",
-                    titlefont=dict(color=C["green"]),
-                    tickfont=dict(color=C["green"], size=10)),
-        yaxis3=dict(title="USD / sqm", overlaying="y", side="right",
-                    anchor="free", position=0.97,
-                    showgrid=False,
-                    titlefont=dict(color=C["blue"]),
-                    tickfont=dict(color=C["blue"], size=10)),
-        legend=dict(**BASE_LAYOUT["legend"], orientation="h",
-                    x=0.01, y=1.06),
         height=440,
     )
     if show_events:
@@ -247,10 +245,11 @@ def build_macro_fig(dff, selected_vars, normalise):
 
     y_title = "Normalised (0–100)" if normalise else "Value"
     fig.update_layout(
-        **BASE_LAYOUT,
+        BASE_LAYOUT,
+        xaxis=BASE_XAXIS,
+        yaxis=dict(**BASE_YAXIS, title=y_title),
+        legend=dict(**BASE_LEGEND, orientation="h", x=0.01, y=1.08),
         title=dict(text="<b>Macroeconomic Regressors</b>", font_size=14, x=0.01),
-        yaxis=dict(**BASE_LAYOUT["yaxis"], title=y_title),
-        legend=dict(**BASE_LAYOUT["legend"], orientation="h", x=0.01, y=1.08),
         height=420,
     )
     return fig
@@ -328,16 +327,16 @@ def build_commodity_fig(dff):
     ), row=1, col=2)
 
     fig.update_layout(
-        **BASE_LAYOUT,
+        BASE_LAYOUT,
         title=dict(text="<b>Commodity Prices</b>  –  Key drivers of the Ghanaian economy",
                    font_size=14, x=0.01),
-        yaxis=dict(**BASE_LAYOUT["yaxis"], title="Gold (USD/oz)"),
-        yaxis2=dict(title="Brent (USD/bbl)", overlaying="y", side="right",
+        yaxis=dict(**BASE_YAXIS, title="Gold (USD/oz)"),
+        yaxis2=dict(title=dict(text="Brent (USD/bbl)", font=dict(color=C["muted"])),
+                    overlaying="y", side="right",
                     showgrid=False,
-                    titlefont=dict(color=C["muted"]),
                     tickfont=dict(color=C["muted"], size=10)),
-        yaxis3=dict(**BASE_LAYOUT["yaxis"], title="Cocoa (USD/MT)"),
-        legend=dict(**BASE_LAYOUT["legend"], orientation="h", x=0.01, y=1.08),
+        yaxis3=dict(**BASE_YAXIS, title="Cocoa (USD/MT)"),
+        legend=dict(**BASE_LEGEND, orientation="h", x=0.01, y=1.08),
         height=380,
     )
     for ann in fig.layout.annotations:
@@ -391,15 +390,15 @@ def build_scatter_fig(dff, x_var, y_var):
         ))
 
     fig.update_layout(
-        **BASE_LAYOUT,
+        BASE_LAYOUT,
         title=dict(
             text=f"<b>{y_label}</b>  vs  <b>{x_label}</b>"
                  + (f"   <span style='color:{C['muted']}; font-size:12px'>R² = {r2:.3f}</span>"
                     if r2 is not None else ""),
             font_size=13, x=0.01,
         ),
-        xaxis=dict(**BASE_LAYOUT["xaxis"], title=x_label),
-        yaxis=dict(**BASE_LAYOUT["yaxis"], title=y_label),
+        xaxis=dict(**BASE_XAXIS, title=x_label),
+        yaxis=dict(**BASE_YAXIS, title=y_label),
         height=430,
     )
     return fig
