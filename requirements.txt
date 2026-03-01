@@ -11,3 +11,5 @@ requests
 beautifulsoup4
 lxml
 yfinance
+dash
+dash-bootstrap-components
