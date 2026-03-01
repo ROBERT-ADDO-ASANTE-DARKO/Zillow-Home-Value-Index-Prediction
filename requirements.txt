@@ -6,3 +6,8 @@ gdown
 folium
 streamlit-folium
 geopy
+numpy
+requests
+beautifulsoup4
+lxml
+yfinance
