@@ -87,6 +87,51 @@ DISTRICT_CONFIGS: dict = {
     "Kasoa":        (0.53,  +0.013),   # Peri-urban west; fastest relative catch-up
 }
 
+PRIME_OUTPUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "data", "accra_prime_prices.csv")
+
+# Annual USD/sqm anchors for each prime / upper-market area.
+# Sources: Global Property Guide Ghana, Numbeo Accra city-centre premium,
+#          JLL Africa Prime Residential Outlook, Knight Frank Africa Wealth
+#          Report, Broll Ghana prime notes.
+# Unlike mid-market districts (derived via a multiplier on the composite),
+# prime areas carry their own independently estimated USD price series because
+# they are effectively USD-indexed — leases and sale prices are routinely
+# quoted in dollars, insulating them from cedi depreciation on the USD side
+# while amplifying GHS-denominated index growth when the cedi weakens.
+PRIME_CONFIGS: dict = {
+    "East Legon": {
+        2010: 800,  2011: 900,  2012: 1000, 2013: 1100, 2014: 1150,
+        2015: 1400, 2016: 1500, 2017: 1650, 2018: 1900, 2019: 2100,
+        2020: 2000, 2021: 2200, 2022: 2400, 2023: 2700, 2024: 3000,
+    },
+    "Cantonments": {
+        2010: 1000, 2011: 1150, 2012: 1300, 2013: 1500, 2014: 1600,
+        2015: 1800, 2016: 1950, 2017: 2100, 2018: 2400, 2019: 2600,
+        2020: 2500, 2021: 2750, 2022: 2900, 2023: 3100, 2024: 3200,
+    },
+    "Airport Residential": {
+        2010: 700,  2011: 800,  2012: 900,  2013: 1000, 2014: 1050,
+        2015: 1200, 2016: 1300, 2017: 1450, 2018: 1650, 2019: 1850,
+        2020: 1750, 2021: 1950, 2022: 2100, 2023: 2300, 2024: 2500,
+    },
+    "Labone / Roman Ridge": {
+        2010: 600,  2011: 680,  2012: 760,  2013: 850,  2014: 880,
+        2015: 1000, 2016: 1080, 2017: 1200, 2018: 1380, 2019: 1550,
+        2020: 1480, 2021: 1650, 2022: 1780, 2023: 1900, 2024: 2000,
+    },
+    "Dzorwulu / Abelenkpe": {
+        2010: 580,  2011: 660,  2012: 740,  2013: 830,  2014: 860,
+        2015: 980,  2016: 1060, 2017: 1180, 2018: 1350, 2019: 1520,
+        2020: 1450, 2021: 1620, 2022: 1760, 2023: 1930, 2024: 2100,
+    },
+    "Trasacco Valley": {
+        2010: 1500, 2011: 1700, 2012: 1900, 2013: 2200, 2014: 2400,
+        2015: 2700, 2016: 2900, 2017: 3100, 2018: 3400, 2019: 3700,
+        2020: 3500, 2021: 3800, 2022: 4100, 2023: 4400, 2024: 4500,
+    },
+}
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -275,6 +320,16 @@ OIL_SEASONAL = [
     0.985, 0.990, 1.000, 1.010, 1.015, 1.020,
     # Jul   Aug   Sep   Oct   Nov   Dec
     1.015, 1.010, 1.005, 0.995, 0.985, 0.980,
+]
+
+# Prime residential areas: much flatter seasonal pattern than mid-market.
+# Expatriate, corporate, and diplomatic demand is less tied to the Ghanaian
+# school calendar; a slight Q1 lean reflects new posting cycles.
+PRIME_SEASONAL = [
+    # Jan   Feb   Mar   Apr   May   Jun
+    1.006, 1.008, 1.004, 1.002, 1.000, 0.998,
+    # Jul   Aug   Sep   Oct   Nov   Dec
+    0.996, 0.994, 0.996, 0.998, 0.999, 0.999,
 ]
 
 # Accra property market seasonal multipliers (Ghanaian fiscal calendar,
@@ -659,6 +714,40 @@ def main():
     print(
         f"  Rows  : {len(df_districts):,}  "
         f"({len(DISTRICT_CONFIGS)} districts × {len(dates)} months)"
+    )
+    print()
+
+    # ── Prime-area price series ────────────────────────────────────────────────
+    print("\n[6/6] Building prime-area price series …")
+    prime_records = []
+    for area, annual_usd in PRIME_CONFIGS.items():
+        price_usd_prime_raw = annual_dict_to_monthly(annual_usd, dates)
+        price_usd_prime = apply_seasonality(price_usd_prime_raw, PRIME_SEASONAL)
+        seed = (sum(ord(c) for c in area) + 1000) % (2 ** 31)
+        price_usd_prime = add_noise(price_usd_prime, sigma_frac=0.008, seed=seed)
+        ahpi_prime, price_ghs_prime = build_ahpi(price_usd_prime, exchange_rate_monthly)
+        for d, av, gv, uv in zip(
+            dates, ahpi_prime.values, price_ghs_prime.values, price_usd_prime.values
+        ):
+            prime_records.append({
+                "ds":                d,
+                "district":          area,
+                "y":                 round(float(av), 2),
+                "price_ghs_per_sqm": int(round(float(gv))),
+                "price_usd_per_sqm": int(round(float(uv))),
+            })
+        usd_2024 = list(annual_usd.values())[-1]
+        print(
+            f"  ✓ {area:<25}  Dec 2024 AHPI = {ahpi_prime.iloc[-1]:.1f}"
+            f"  |  USD/sqm 2024 = {usd_2024:,}"
+        )
+
+    df_prime = pd.DataFrame(prime_records)
+    df_prime.to_csv(PRIME_OUTPUT_PATH, index=False)
+    print(f"\n  Saved → {PRIME_OUTPUT_PATH}")
+    print(
+        f"  Rows  : {len(df_prime):,}  "
+        f"({len(PRIME_CONFIGS)} prime areas × {len(dates)} months)"
     )
     print()
 

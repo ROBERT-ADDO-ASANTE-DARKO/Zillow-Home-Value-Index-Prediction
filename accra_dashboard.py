@@ -39,10 +39,30 @@ DISTRICT_DATA_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "data", "accra_district_prices.csv",
 )
+PRIME_DATA_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "data", "accra_prime_prices.csv",
+)
 DF = pd.read_csv(DATA_PATH, parse_dates=["ds"])
 DF_DISTRICT = pd.read_csv(DISTRICT_DATA_PATH, parse_dates=["ds"])
+DF_PRIME = pd.read_csv(PRIME_DATA_PATH, parse_dates=["ds"])
 YEARS = list(range(DF["ds"].dt.year.min(), DF["ds"].dt.year.max() + 1))
 DISTRICTS = DF_DISTRICT["district"].unique().tolist()
+PRIME_AREAS = DF_PRIME["district"].unique().tolist()
+
+# Prime aggregate: mean of all six areas per month, with macro columns joined
+# so the KPI callback can read exchange_rate / inflation / gold from one place.
+_prime_agg = (
+    DF_PRIME.groupby("ds")[["y", "price_ghs_per_sqm", "price_usd_per_sqm"]]
+    .mean()
+    .round(2)
+    .reset_index()
+)
+DF_PRIME_FULL = _prime_agg.merge(
+    DF[["ds", "exchange_rate_ghs_usd", "inflation_cpi_pct", "gold_price_usd"]],
+    on="ds",
+    how="left",
+)
 
 # ── palette ───────────────────────────────────────────────────────────────────
 C = {
@@ -83,6 +103,15 @@ DISTRICT_COLORS = {
     "Tema":         "#d4a017",   # gold
     "Dome":         "#bc8cff",   # purple
     "Kasoa":        "#ffa657",   # orange
+}
+
+PRIME_COLORS = {
+    "East Legon":           "#ff7b72",   # red-salmon
+    "Cantonments":          "#e3b341",   # yellow-gold
+    "Airport Residential":  "#d2a8ff",   # lavender
+    "Labone / Roman Ridge": "#56d364",   # bright green
+    "Dzorwulu / Abelenkpe": "#79c0ff",   # sky blue
+    "Trasacco Valley":      "#f0883e",   # amber
 }
 
 COMMODITY_META = {
@@ -145,6 +174,17 @@ def filter_df_district(start_yr, end_yr, district="all"):
     return dff
 
 
+def filter_df_prime(start_yr, end_yr, area="all"):
+    mask = (
+        (DF_PRIME["ds"].dt.year >= start_yr) &
+        (DF_PRIME["ds"].dt.year <= end_yr)
+    )
+    dff = DF_PRIME[mask].copy()
+    if area != "all":
+        dff = dff[dff["district"] == area]
+    return dff
+
+
 def add_event_lines(fig, dff):
     """Add vertical event annotation lines to a plain (non-subplots) figure."""
     for date_str, label, pos in KEY_EVENTS:
@@ -189,42 +229,77 @@ def linreg(x, y):
 
 
 # ── figure builders ───────────────────────────────────────────────────────────
-def build_ahpi_fig(dff, overlays, show_events):
+def build_ahpi_fig(dff, overlays, show_events, segment="mid", dff_prime_full=None):
     fig = go.Figure()
 
-    # area fill
+    # ── choose main series by segment ─────────────────────────────────────────
+    if segment == "prime" and dff_prime_full is not None:
+        main_dff    = dff_prime_full
+        main_color  = C["red"]
+        fill_color  = "rgba(248,81,73,0.10)"
+        main_label  = "AHPI – Prime avg"
+        chart_title = ("<b>Accra Home Price Index</b>  ·  "
+                       "<span style='color:#f85149'>Prime Areas Average</span>"
+                       "  (GHS, 2015 = 100)")
+    else:
+        main_dff    = dff
+        main_color  = C["gold"]
+        fill_color  = "rgba(212,160,23,0.12)"
+        main_label  = "AHPI – Mid-Market"
+        chart_title = ("<b>Accra Home Price Index</b>  ·  "
+                       "<span style='color:#d4a017'>Mid-Market</span>"
+                       "  (GHS, 2015 = 100)")
+
+    if segment == "both":
+        chart_title = ("<b>Accra Home Price Index</b>  ·  "
+                       "<span style='color:#d4a017'>Mid-Market</span>"
+                       "  vs  "
+                       "<span style='color:#f85149'>Prime avg</span>"
+                       "  (GHS, 2015 = 100)")
+
+    # ── area fill (main series) ────────────────────────────────────────────────
     fig.add_trace(go.Scatter(
-        x=dff["ds"], y=dff["y"],
-        fill="tozeroy", fillcolor="rgba(212,160,23,0.12)",
-        line=dict(color=C["gold"], width=2.5),
-        name="AHPI (2015 = 100)",
-        hovertemplate="%{y:.1f}<extra>AHPI</extra>",
+        x=main_dff["ds"], y=main_dff["y"],
+        fill="tozeroy", fillcolor=fill_color,
+        line=dict(color=main_color, width=2.5),
+        name=main_label,
+        hovertemplate="%{y:.1f}<extra>" + main_label + "</extra>",
     ))
 
-    # baseline
+    # ── prime overlay when comparing both ─────────────────────────────────────
+    if segment == "both" and dff_prime_full is not None:
+        fig.add_trace(go.Scatter(
+            x=dff_prime_full["ds"], y=dff_prime_full["y"],
+            line=dict(color=C["red"], width=2, dash="dash"),
+            name="AHPI – Prime avg",
+            hovertemplate="%{y:.1f}<extra>Prime avg</extra>",
+        ))
+
+    # ── 2015 baseline ──────────────────────────────────────────────────────────
     fig.add_hline(y=100, line_dash="dot", line_color=C["muted"],
                   line_width=0.9, opacity=0.5,
                   annotation_text="2015 baseline",
                   annotation_font_color=C["muted"],
                   annotation_font_size=9)
 
-    if "ghs" in overlays:
-        fig.add_trace(go.Scatter(
-            x=dff["ds"], y=dff["price_ghs_per_sqm"],
-            line=dict(color=C["green"], width=1.6, dash="dash"),
-            name="GHS / sqm",
-            yaxis="y2",
-            hovertemplate="GHS %{y:,.0f}<extra>GHS/sqm</extra>",
-        ))
-
-    if "usd" in overlays:
-        fig.add_trace(go.Scatter(
-            x=dff["ds"], y=dff["price_usd_per_sqm"],
-            line=dict(color=C["blue"], width=1.6, dash="dot"),
-            name="USD / sqm",
-            yaxis="y3",
-            hovertemplate="$%{y:,.0f}<extra>USD/sqm</extra>",
-        ))
+    # ── price overlays (mid-market or prime only, not when comparing) ──────────
+    if segment != "both":
+        if "ghs" in overlays:
+            fig.add_trace(go.Scatter(
+                x=main_dff["ds"], y=main_dff["price_ghs_per_sqm"],
+                line=dict(color=C["green"], width=1.6, dash="dash"),
+                name="GHS / sqm",
+                yaxis="y2",
+                hovertemplate="GHS %{y:,.0f}<extra>GHS/sqm</extra>",
+            ))
+        if "usd" in overlays:
+            fig.add_trace(go.Scatter(
+                x=main_dff["ds"], y=main_dff["price_usd_per_sqm"],
+                line=dict(color=C["blue"], width=1.6, dash="dot"),
+                name="USD / sqm",
+                yaxis="y3",
+                hovertemplate="$%{y:,.0f}<extra>USD/sqm</extra>",
+            ))
 
     fig.update_layout(
         BASE_LAYOUT,
@@ -239,12 +314,11 @@ def build_ahpi_fig(dff, overlays, show_events):
                     anchor="free", position=0.97, showgrid=False,
                     tickfont=dict(color=C["blue"], size=10)),
         legend=dict(**BASE_LEGEND, orientation="h", x=0.01, y=1.06),
-        title=dict(text="<b>Accra Home Price Index</b>  (GHS-denominated, base 2015 = 100)",
-                   font_size=14, x=0.01),
+        title=dict(text=chart_title, font_size=14, x=0.01),
         height=440,
     )
     if show_events:
-        add_event_lines(fig, dff)
+        add_event_lines(fig, main_dff)
     return fig
 
 
@@ -595,6 +669,133 @@ def build_district_price_table(yr_range):
     )
 
 
+def build_prime_comparison_fig(dff, show_events=True):
+    """Overlay all six prime-area AHPI lines on a single chart."""
+    fig = go.Figure()
+    for area in PRIME_AREAS:
+        d = dff[dff["district"] == area]
+        if d.empty:
+            continue
+        fig.add_trace(go.Scatter(
+            x=d["ds"], y=d["y"],
+            line=dict(color=PRIME_COLORS[area], width=2),
+            name=area,
+            hovertemplate=f"{area}: %{{y:.1f}}<extra></extra>",
+        ))
+
+    fig.add_hline(y=100, line_dash="dot", line_color=C["muted"],
+                  line_width=0.9, opacity=0.5,
+                  annotation_text="2015 baseline",
+                  annotation_font_color=C["muted"],
+                  annotation_font_size=9)
+    fig.update_layout(
+        BASE_LAYOUT,
+        xaxis=BASE_XAXIS,
+        yaxis=dict(**BASE_YAXIS, title="Index (2015 = 100)"),
+        legend=dict(**BASE_LEGEND, orientation="h", x=0.01, y=1.06),
+        title=dict(text="<b>AHPI — Prime Areas</b>  (USD-indexed markets, base 2015 = 100 per area)",
+                   font_size=14, x=0.01),
+        height=460,
+    )
+    if show_events:
+        add_event_lines(fig, dff)
+    return fig
+
+
+def build_prime_single_fig(dff, area):
+    """Area chart for one prime location's AHPI + GHS/sqm and USD/sqm."""
+    color = PRIME_COLORS.get(area, C["red"])
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=dff["ds"], y=dff["y"],
+        fill="tozeroy",
+        fillcolor=f"rgba({int(color[1:3],16)},{int(color[3:5],16)},{int(color[5:7],16)},0.12)",
+        line=dict(color=color, width=2.5),
+        name=f"AHPI – {area}",
+        hovertemplate="%{y:.1f}<extra>AHPI</extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=dff["ds"], y=dff["price_ghs_per_sqm"],
+        line=dict(color=C["green"], width=1.6, dash="dash"),
+        name="GHS / sqm",
+        yaxis="y2",
+        hovertemplate="GHS %{y:,.0f}<extra>GHS/sqm</extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=dff["ds"], y=dff["price_usd_per_sqm"],
+        line=dict(color=C["blue"], width=1.6, dash="dot"),
+        name="USD / sqm",
+        yaxis="y3",
+        hovertemplate="$%{y:,.0f}<extra>USD/sqm</extra>",
+    ))
+    fig.add_hline(y=100, line_dash="dot", line_color=C["muted"],
+                  line_width=0.9, opacity=0.5,
+                  annotation_text="2015 baseline",
+                  annotation_font_color=C["muted"],
+                  annotation_font_size=9)
+    fig.update_layout(
+        BASE_LAYOUT,
+        xaxis=BASE_XAXIS,
+        yaxis=dict(**BASE_YAXIS, title="Index (2015 = 100)"),
+        yaxis2=dict(title=dict(text="GHS / sqm", font=dict(color=C["green"])),
+                    overlaying="y", side="right",
+                    showgrid=False, tickformat=",",
+                    tickfont=dict(color=C["green"], size=10)),
+        yaxis3=dict(title=dict(text="USD / sqm", font=dict(color=C["blue"])),
+                    overlaying="y", side="right",
+                    anchor="free", position=0.97, showgrid=False,
+                    tickfont=dict(color=C["blue"], size=10)),
+        legend=dict(**BASE_LEGEND, orientation="h", x=0.01, y=1.06),
+        title=dict(text=f"<b>AHPI — {area}</b>  (USD-indexed prime market, base 2015 = 100)",
+                   font_size=14, x=0.01),
+        height=460,
+    )
+    add_event_lines(fig, dff)
+    return fig
+
+
+def build_prime_price_table(yr_range):
+    """Summary table showing latest prices across all prime areas."""
+    dff = filter_df_prime(*yr_range)
+    latest_date = dff["ds"].max()
+    rows = []
+    for area in PRIME_AREAS:
+        row = dff[(dff["district"] == area) & (dff["ds"] == latest_date)]
+        if row.empty:
+            continue
+        r = row.iloc[0]
+        dot = html.Span("●", style={"color": PRIME_COLORS[area],
+                                    "marginRight": "6px", "fontSize": "1.1rem"})
+        rows.append(html.Tr([
+            html.Td([dot, area],
+                    style={"color": C["text"], "fontWeight": "600", "padding": "6px 12px"}),
+            html.Td(f"{r['y']:.1f}",
+                    style={"color": C["gold"], "textAlign": "right", "padding": "6px 12px"}),
+            html.Td(f"GHS {r['price_ghs_per_sqm']:,.0f}",
+                    style={"color": C["green"], "textAlign": "right", "padding": "6px 12px"}),
+            html.Td(f"${r['price_usd_per_sqm']:,.0f}",
+                    style={"color": C["blue"], "textAlign": "right", "padding": "6px 12px"}),
+        ]))
+    header = html.Tr([
+        html.Th("Prime Area",  style={"color": C["muted"], "padding": "6px 12px",
+                                      "borderBottom": f"1px solid {C['border']}"}),
+        html.Th("AHPI",        style={"color": C["muted"], "textAlign": "right",
+                                      "padding": "6px 12px",
+                                      "borderBottom": f"1px solid {C['border']}"}),
+        html.Th("GHS / sqm",   style={"color": C["muted"], "textAlign": "right",
+                                      "padding": "6px 12px",
+                                      "borderBottom": f"1px solid {C['border']}"}),
+        html.Th("USD / sqm",   style={"color": C["muted"], "textAlign": "right",
+                                      "padding": "6px 12px",
+                                      "borderBottom": f"1px solid {C['border']}"}),
+    ])
+    return html.Table(
+        [html.Thead(header), html.Tbody(rows)],
+        style={"width": "100%", "fontSize": "0.85rem", "borderCollapse": "collapse"},
+    )
+
+
 # ── reusable layout pieces ────────────────────────────────────────────────────
 def kpi_card(label, val_id, icon, color=C["gold"]):
     return dbc.Col(
@@ -661,6 +862,28 @@ range_slider = section_card(
 # ── tab: Overview ─────────────────────────────────────────────────────────────
 tab_overview = html.Div([
     section_card(
+        # ── market segment selector ───────────────────────────────────────────
+        dbc.Row([
+            dbc.Col(
+                html.Div([
+                    html.Span("Market segment:", style={"color": C["muted"],
+                                                        "fontSize": "0.8rem",
+                                                        "marginRight": "10px"}),
+                    dbc.RadioItems(
+                        id="overview-segment",
+                        options=[
+                            {"label": " Mid-Market",       "value": "mid"},
+                            {"label": " Prime Areas (avg)", "value": "prime"},
+                            {"label": " Compare Both",      "value": "both"},
+                        ],
+                        value="mid",
+                        inline=True,
+                        style={"fontSize": "0.8rem"},
+                    ),
+                ], className="d-flex align-items-center"),
+            ),
+        ], className="mb-2"),
+        # ── overlays + events row ─────────────────────────────────────────────
         html.Div([
             html.Span("Overlays:", style={"color": C["muted"], "fontSize": "0.8rem",
                                           "marginRight": "8px"}),
@@ -684,6 +907,12 @@ tab_overview = html.Div([
                 switch=True,
                 style={"fontSize": "0.8rem"},
             ),
+            html.Span("  |  ", style={"color": C["border"], "margin": "0 8px",
+                                      "id": "overlay-separator"}),
+            html.Span("Overlays disabled in Compare mode",
+                      id="overlay-note",
+                      style={"color": C["muted"], "fontSize": "0.75rem",
+                             "fontStyle": "italic", "display": "none"}),
         ], className="d-flex align-items-center flex-wrap mb-2"),
         dcc.Graph(id="ahpi-chart", config={"displayModeBar": True,
                                             "modeBarButtonsToRemove": ["lasso2d"],
@@ -824,6 +1053,49 @@ tab_districts = html.Div([
     ),
 ])
 
+# ── tab: Prime Areas ──────────────────────────────────────────────────────────
+tab_prime = html.Div([
+    section_card(
+        dbc.Row([
+            dbc.Col([
+                html.Label("Select prime area", style={"fontSize": "0.78rem",
+                                                       "color": C["muted"]}),
+                dcc.Dropdown(
+                    id="prime-selector",
+                    options=(
+                        [{"label": "Compare All Prime Areas", "value": "all"}] +
+                        [{"label": a, "value": a} for a in PRIME_AREAS]
+                    ),
+                    value="all",
+                    clearable=False,
+                    style={"backgroundColor": C["bg"], "color": C["text"],
+                           "fontSize": "0.82rem"},
+                ),
+            ], md=5),
+            dbc.Col([
+                html.Label("Key events", style={"fontSize": "0.78rem",
+                                                "color": C["muted"]}),
+                dbc.Switch(id="prime-events", value=True, label=""),
+            ], md=2, className="d-flex flex-column justify-content-start"),
+        ], className="mb-2"),
+        html.Div(
+            "Prime areas are USD-indexed: sale prices and rents are routinely quoted in dollars. "
+            "Their AHPI therefore reflects both USD price appreciation and GHS depreciation — "
+            "producing significantly higher nominal GHS growth than mid-market districts.",
+            style={"fontSize": "0.78rem", "color": C["muted"], "marginBottom": "10px"},
+        ),
+        dcc.Graph(id="prime-chart",
+                  config={"displayModeBar": True,
+                          "modeBarButtonsToRemove": ["lasso2d"],
+                          "toImageButtonOptions": {"scale": 2}}),
+    ),
+    section_card(
+        html.P("Latest values (end of selected date range)",
+               style={"color": C["muted"], "fontSize": "0.78rem", "marginBottom": "10px"}),
+        html.Div(id="prime-price-table"),
+    ),
+])
+
 # ── app layout ────────────────────────────────────────────────────────────────
 app = dash.Dash(
     __name__,
@@ -851,7 +1123,7 @@ app.layout = html.Div(
                                       style={"fontSize": "1.25rem", "fontWeight": "700",
                                              "color": C["gold"], "letterSpacing": "0.05em"}),
                         ], className="d-flex align-items-center"),
-                        html.Div("Monthly dataset · Jan 2010 – Dec 2024  ·  20 regressors  ·  Prophet-ready",
+                        html.Div("Monthly dataset · Jan 2010 – Dec 2024  ·  Mid-Market (5 districts)  ·  Prime Areas (6 locations)  ·  Prophet-ready",
                                  style={"fontSize": "0.75rem", "color": C["muted"],
                                         "marginTop": "2px"}),
                     ], md=7),
@@ -902,6 +1174,9 @@ app.layout = html.Div(
                 dbc.Tab(tab_districts,  label="Districts",           tab_id="tab-districts",
                         label_style={"color": C["muted"], "fontSize": "0.85rem"},
                         active_label_style={"color": C["gold"], "fontWeight": "600"}),
+                dbc.Tab(tab_prime,      label="Prime Areas",         tab_id="tab-prime",
+                        label_style={"color": C["muted"], "fontSize": "0.85rem"},
+                        active_label_style={"color": C["gold"], "fontWeight": "600"}),
             ], id="main-tabs", active_tab="tab-overview",
                style={"borderBottom": f"1px solid {C['border']}"},
                className="mb-3"),
@@ -949,42 +1224,69 @@ def update_range_label(yr_range):
     Output("kpi-infl-sub",  "children"),
     Output("kpi-gold",      "children"),
     Output("kpi-gold-sub",  "children"),
-    Input("year-range", "value"),
+    Input("year-range",       "value"),
+    Input("overview-segment", "value"),
     prevent_initial_call=False,
 )
-def update_kpis(yr_range):
-    dff    = filter_df(*yr_range)
-    latest = dff.iloc[-1]
-    prev   = dff.iloc[-13] if len(dff) > 13 else dff.iloc[0]
+def update_kpis(yr_range, segment):
+    # For the AHPI / price KPIs, switch to prime aggregate when prime is selected.
+    # Macro KPIs (FX, inflation, gold) are national data — same for all segments.
+    if segment == "prime":
+        price_src = DF_PRIME_FULL[
+            (DF_PRIME_FULL["ds"].dt.year >= yr_range[0]) &
+            (DF_PRIME_FULL["ds"].dt.year <= yr_range[1])
+        ].copy()
+    else:
+        price_src = filter_df(*yr_range)
 
-    def yoy(col):
+    macro_src = filter_df(*yr_range)
+
+    latest_p = price_src.iloc[-1]
+    prev_p   = price_src.iloc[-13] if len(price_src) > 13 else price_src.iloc[0]
+    latest_m = macro_src.iloc[-1]
+    prev_m   = macro_src.iloc[-13] if len(macro_src) > 13 else macro_src.iloc[0]
+
+    def yoy(latest, prev, col):
         chg = latest[col] - prev[col]
         pct = (chg / abs(prev[col]) * 100) if prev[col] != 0 else 0
         arrow = "▲" if chg >= 0 else "▼"
         color = C["green"] if chg >= 0 else C["red"]
-        return html.Span(f"{arrow} {abs(pct):.1f}% YoY",
-                         style={"color": color})
+        return html.Span(f"{arrow} {abs(pct):.1f}% YoY", style={"color": color})
 
     return (
-        f"{latest['y']:.1f}",             yoy("y"),
-        f"GHS {latest['price_ghs_per_sqm']:,.0f}",  yoy("price_ghs_per_sqm"),
-        f"${latest['price_usd_per_sqm']:,.0f}",      yoy("price_usd_per_sqm"),
-        f"{latest['exchange_rate_ghs_usd']:.2f}",    yoy("exchange_rate_ghs_usd"),
-        f"{latest['inflation_cpi_pct']:.1f}%",        yoy("inflation_cpi_pct"),
-        f"${latest['gold_price_usd']:,.0f}",          yoy("gold_price_usd"),
+        f"{latest_p['y']:.1f}",                           yoy(latest_p, prev_p, "y"),
+        f"GHS {latest_p['price_ghs_per_sqm']:,.0f}",      yoy(latest_p, prev_p, "price_ghs_per_sqm"),
+        f"${latest_p['price_usd_per_sqm']:,.0f}",         yoy(latest_p, prev_p, "price_usd_per_sqm"),
+        f"{latest_m['exchange_rate_ghs_usd']:.2f}",       yoy(latest_m, prev_m, "exchange_rate_ghs_usd"),
+        f"{latest_m['inflation_cpi_pct']:.1f}%",          yoy(latest_m, prev_m, "inflation_cpi_pct"),
+        f"${latest_m['gold_price_usd']:,.0f}",            yoy(latest_m, prev_m, "gold_price_usd"),
     )
 
 
 @app.callback(
-    Output("ahpi-chart", "figure"),
-    Input("year-range",    "value"),
-    Input("ahpi-overlays", "value"),
-    Input("ahpi-events",   "value"),
+    Output("ahpi-chart",   "figure"),
+    Output("overlay-note", "style"),
+    Input("year-range",        "value"),
+    Input("ahpi-overlays",     "value"),
+    Input("ahpi-events",       "value"),
+    Input("overview-segment",  "value"),
     prevent_initial_call=False,
 )
-def update_ahpi(yr_range, overlays, events):
+def update_ahpi(yr_range, overlays, events, segment):
     dff = filter_df(*yr_range)
-    return build_ahpi_fig(dff, overlays or [], bool(events))
+    dff_prime_full = DF_PRIME_FULL[
+        (DF_PRIME_FULL["ds"].dt.year >= yr_range[0]) &
+        (DF_PRIME_FULL["ds"].dt.year <= yr_range[1])
+    ].copy()
+    note_style = ({"color": C["muted"], "fontSize": "0.75rem", "fontStyle": "italic"}
+                  if segment == "both"
+                  else {"display": "none"})
+    return (
+        build_ahpi_fig(dff, overlays or [], bool(events),
+                       segment=segment or "mid",
+                       dff_prime_full=dff_prime_full),
+        note_style,
+    )
 
 
 @app.callback(
@@ -1071,6 +1373,24 @@ def update_district(yr_range, district, show_events):
         dff_single = dff[dff["district"] == district]
         fig = build_district_single_fig(dff_single, district)
     return fig, build_district_price_table(yr_range)
+
+
+@app.callback(
+    Output("prime-chart",       "figure"),
+    Output("prime-price-table", "children"),
+    Input("year-range",      "value"),
+    Input("prime-selector",  "value"),
+    Input("prime-events",    "value"),
+    prevent_initial_call=False,
+)
+def update_prime(yr_range, area, show_events):
+    dff = filter_df_prime(*yr_range)
+    if area == "all":
+        fig = build_prime_comparison_fig(dff, show_events=bool(show_events))
+    else:
+        dff_single = dff[dff["district"] == area]
+        fig = build_prime_single_fig(dff_single, area)
+    return fig, build_prime_price_table(yr_range)
 
 
 # ── run ───────────────────────────────────────────────────────────────────────

@@ -11,21 +11,36 @@
 4. [Geographic Coverage](#4-geographic-coverage)
 5. [Dataset Structure](#5-dataset-structure)
 6. [Key Findings & Trends](#6-key-findings--trends)
-7. [Regressor Correlations](#7-regressor-correlations)
-8. [Stakeholders & Implications](#8-stakeholders--implications)
-9. [Limitations & Caveats](#9-limitations--caveats)
-10. [Using AHPI with Facebook Prophet](#10-using-ahpi-with-facebook-prophet)
-11. [Data Sources](#11-data-sources)
+7. [Per-District Analysis](#7-per-district-analysis)
+8. [Prime Areas Index](#8-prime-areas-index)
+9. [Regressor Correlations](#9-regressor-correlations)
+10. [Stakeholders & Implications](#10-stakeholders--implications)
+11. [Limitations & Caveats](#11-limitations--caveats)
+12. [Using AHPI with Facebook Prophet](#12-using-ahpi-with-facebook-prophet)
+13. [Data Sources](#13-data-sources)
 
 ---
 
 ## 1. Executive Summary
 
-The **Accra Home Price Index (AHPI)** is a monthly time-series index that tracks the nominal value of mid-market residential property in Greater Accra, Ghana, expressed in **Ghanaian Cedis (GHS)** and normalised to a base of **100 in 2015**.
+The **Accra Home Price Index (AHPI)** is a suite of monthly time-series indices that track the nominal value of residential property in Greater Accra, Ghana, expressed in **Ghanaian Cedis (GHS)** and normalised to a base of **100 in 2015**. The suite comprises three datasets:
 
-Between January 2010 and December 2024, the AHPI rose from **29.9 to 406.9** — an increase of **+1,261%** in cedi terms. In US Dollar terms, the same properties rose only **+34%** (from ~USD 733/sqm to ~USD 984/sqm), revealing that the overwhelming driver of nominal cedi price growth is **currency depreciation and inflation**, not a fundamental appreciation in real property values.
+| Dataset | File | Scope | Rows |
+|---------|------|-------|------|
+| **Aggregate mid-market** | `accra_home_price_index.csv` | 5-district composite + 20 macro regressors | 180 |
+| **Per-district mid-market** | `accra_district_prices.csv` | 5 districts individually | 900 |
+| **Prime areas** | `accra_prime_prices.csv` | 6 prime/luxury locations | 1,080 |
 
-The dataset contains **180 monthly observations across 22 columns** — one target variable (`y`) and **20 regressors** drawn from macroeconomic, demographic, fiscal, and commodity-price data — making it directly suitable for training a [Facebook Prophet](https://facebook.github.io/prophet/) forecasting model with additional regressors.
+### Mid-Market (Aggregate)
+Between January 2010 and December 2024, the composite AHPI rose from **29.9 to 419.7** — an increase of **+1,303%** in cedi terms. In US Dollar terms, the same properties rose only **+34%** (from ~USD 733/sqm to ~USD 985/sqm), revealing that the overwhelming driver of nominal cedi price growth is **currency depreciation and inflation**, not a fundamental appreciation in real property values.
+
+### Per-District Divergence
+District-level indices reveal meaningful within-market heterogeneity. **Kasoa** recorded the strongest nominal GHS growth (+1,762%) and the highest USD appreciation (+88%), reflecting rapid peri-urban expansion. **Dome** was the most stable (+1,145% GHS, +26% USD). December 2024 AHPI levels range from **389.6** (Dome) to **489.1** (Kasoa).
+
+### Prime Areas
+The six prime areas — East Legon, Cantonments, Airport Residential, Labone/Roman Ridge, Dzorwulu/Abelenkpe, and Trasacco Valley — tell a fundamentally different story. These markets are **USD-indexed**, meaning real (USD) appreciation is substantial: average USD/sqm grew from **USD 866** (Jan 2010) to **USD 2,874** (Dec 2024), a **+232% real gain** compared to mid-market's +34%. December 2024 prime AHPI averaged **776.3** (range: 655.2 to 851.5), approximately **1.8× the mid-market composite**.
+
+The aggregate mid-market dataset contains **180 monthly observations across 22 columns** — one target variable (`y`) and **20 regressors** drawn from macroeconomic, demographic, fiscal, and commodity-price data — making it directly suitable for training a [Facebook Prophet](https://facebook.github.io/prophet/) forecasting model with additional regressors.
 
 ---
 
@@ -40,7 +55,7 @@ The AHPI is modelled conceptually after the [Zillow Home Value Index (ZHVI)](htt
 | **Base year** | 2015 = 100 |
 | **Frequency** | Monthly (first of each month) |
 | **Coverage** | Jan 2010 – Dec 2024 (180 months) |
-| **Market segment** | Mid-market residential (not prime/luxury) |
+| **Market segment** | Mid-market residential (composite); per-district; prime/luxury |
 | **Geographic scope** | Greater Accra metropolitan area |
 
 Unlike the ZHVI, which aggregates millions of automated valuations, the AHPI is constructed from **annual price-anchor data points** (USD/sqm) sourced from published real estate research, converted to GHS, and interpolated to monthly frequency. It is an **estimated index**, not a transaction-based one, and should be interpreted accordingly.
@@ -97,45 +112,85 @@ A **12-month multiplicative seasonal factor** is applied to the property price s
 
 Similar seasonal factors are applied to gold, cocoa, and oil prices to reflect known commodity-market seasonality.
 
+### 3.6 Per-District Methodology
+
+District-level indices are derived from the composite aggregate using a **time-varying multiplier** applied to the shared composite USD/sqm anchor:
+
+```
+district_usd_sqm(t) = composite_usd_sqm(t) × mult(t)
+
+mult(t) = base_mult + (year(t) − 2010 + month_fraction(t)) × annual_drift
+```
+
+Each district's `(base_mult, annual_drift)` pair captures both its relative price level in 2010 and the trajectory of that premium or discount over time:
+
+| District | `base_mult` | `annual_drift` | Interpretation |
+|----------|-------------|----------------|----------------|
+| Spintex Road | 1.28 | +0.008 | Above composite and widening — rising corridor premium |
+| Adenta | 1.15 | +0.001 | Above composite, nearly flat premium — stable upper-mid suburb |
+| Tema | 0.98 | −0.002 | Near composite, slight discount widening — industrial city moderating |
+| Dome | 0.86 | −0.004 | Below composite, discount widening — densifying northern suburb |
+| Kasoa | 0.53 | +0.013 | Deep discount in 2010, fastest closing — peri-urban catch-up story |
+
+The resulting USD/sqm series for each district is then passed through the same **seasonality**, **noise**, **GHS conversion**, and **AHPI normalisation** (each district normalised to its own 2015 average = 100) steps as the aggregate index.
+
+### 3.7 Prime Areas Methodology
+
+Prime areas are **independently anchored** rather than multiplier-derived. Each area has its own annual USD/sqm time series sourced from published luxury market research (JLL, Knight Frank, Global Property Guide premium-segment reports). These anchors reflect the USD-denominated nature of prime Accra real estate, where asking prices, leases, and transactions are routinely quoted in US Dollars.
+
+```python
+# Linear interpolation of annual anchors to monthly frequency (July 1 anchor placement)
+monthly_usd = annual_dict_to_monthly(annual_anchors_dict)
+```
+
+A flatter seasonal pattern (±1.0% peak-to-trough vs ±2.5% for mid-market) is applied, reflecting the more liquid and internationally connected nature of prime-area demand. Each area is normalised to its own 2015 average = 100.
+
 ---
 
 ## 4. Geographic Coverage
 
-### 4.1 Mid-Market Districts Covered by the AHPI
+### 4.1 Mid-Market Districts
 
-The index represents the **mid-market residential segment** across five districts of Greater Accra:
+The aggregate AHPI represents the **mid-market residential segment** across five districts of Greater Accra. Individual district indices are available in `accra_district_prices.csv`.
 
-| District | Location | Character | Typical Price Range (2024) |
-|----------|----------|-----------|---------------------------|
-| **Spintex Road** | East Accra | Fast-growing corridor; gated estates, mixed residential-commercial | GHS 10,000–18,000/sqm |
-| **Tema** | 30 km east | Ghana's planned industrial port city; large self-contained communities | GHS 8,000–14,000/sqm |
-| **Dome** | North Accra | Dense residential suburb on the Accra–Kumasi road | GHS 7,000–12,000/sqm |
-| **Adenta** | East Accra | Established municipality; good road access, family estates | GHS 9,000–15,000/sqm |
-| **Kasoa** | Peri-urban west | Rapid expansion beyond Central Region border; most affordable | GHS 5,000–10,000/sqm |
+| District | Location | Character | Dec 2024 AHPI | Dec 2024 GHS/sqm | Dec 2024 USD/sqm | USD growth 2010–24 |
+|----------|----------|-----------|:-------------:|:----------------:|:----------------:|:-----------------:|
+| **Spintex Road** | East Accra | Fast-growing corridor; gated estates, mixed residential-commercial | 429.1 | 19,482 | 1,374 | +48% |
+| **Adenta** | East Accra | Established municipality; good road access, family estates | 398.1 | 15,888 | 1,120 | +34% |
+| **Tema** | 30 km east | Ghana's planned industrial port city; large self-contained communities | 392.6 | 13,090 | 923 | +29% |
+| **Dome** | North Accra | Dense residential suburb on the Accra–Kumasi road | 389.6 | 11,211 | 791 | +26% |
+| **Kasoa** | Peri-urban west | Rapid expansion beyond Central Region border; most affordable | 489.1 | 10,156 | 716 | +88% |
 
-### 4.2 Prime Districts Excluded from the AHPI
+> **Kasoa** stands out as both the most affordable (lowest absolute GHS/sqm) and the fastest-growing in real USD terms (+88%), driven by rapid peri-urban expansion and infrastructure investment closing the discount gap with the established suburbs.
 
-The following **prime and upper-income areas** are explicitly outside the index scope. Their pricing dynamics are dominated by USD-denominated leases, expatriate demand, and embassy tenancies, which would distort a general residential benchmark:
+### 4.2 Prime Areas
 
-| District | Why Excluded | Estimated Price (2024) |
-|----------|-------------|----------------------|
-| **Cantonments** | Diplomatic quarter; embassy compounds | USD 2,500–4,500/sqm |
-| **East Legon** | Accra's most prestigious suburb | USD 2,000–4,000/sqm |
-| **Airport Residential** | Proximity premium to Kotoka International Airport | USD 1,800–3,500/sqm |
-| **Labone / Roman Ridge** | Historic upscale enclaves; very limited supply | USD 1,500–3,000/sqm |
-| **Dzorwulu / Abelenkpe** | Professional-class suburb; corporate housing | USD 1,500–2,800/sqm |
-| **Trasacco Valley** | Luxury gated estates | USD 3,000–6,000/sqm |
+The six prime and upper-income areas were originally outside the mid-market index scope. They now have their own dedicated index (`accra_prime_prices.csv`), as their pricing dynamics — USD-denominated leases, expatriate demand, and embassy tenancies — differ fundamentally from the mid-market composite.
 
-> **Note:** A separate prime-market index for these districts would behave very differently — more correlated with gold prices and FDI inflows, less sensitive to domestic CPI — and would require its own anchors and methodology.
+| Area | Character | Dec 2024 AHPI | Dec 2024 GHS/sqm | Dec 2024 USD/sqm | USD growth 2010–24 |
+|------|-----------|:-------------:|:----------------:|:----------------:|:-----------------:|
+| **East Legon** | Accra's most prestigious suburb; gated communities, embassies | 851.5 | 42,264 | 2,980 | +270% |
+| **Cantonments** | Diplomatic quarter; embassy compounds and ministerial residences | 698.2 | 45,351 | 3,198 | +218% |
+| **Airport Residential** | Proximity premium to Kotoka International Airport | 826.3 | 35,662 | 2,515 | +258% |
+| **Labone / Roman Ridge** | Historic upscale enclave; very limited supply | 778.5 | 27,837 | 1,963 | +222% |
+| **Dzorwulu / Abelenkpe** | Professional-class suburb; corporate and NGO housing | 847.9 | 29,753 | 2,098 | +264% |
+| **Trasacco Valley** | Ultra-luxury gated estates; highest absolute price per sqm | 655.2 | 63,657 | 4,489 | +200% |
+
+> **Prime vs mid-market:** The average prime AHPI (776.3) is **1.8× the mid-market composite** (419.7). In USD/sqm terms, the premium is even larger: prime areas average USD 2,874/sqm versus USD 985/sqm for mid-market — a **2.9× premium**. Unlike mid-market where USD appreciation was modest (+34%), prime areas delivered genuine real returns averaging **+232% in USD** over 14 years, driven by structural undersupply relative to expatriate and diplomatic demand.
 
 ---
 
 ## 5. Dataset Structure
 
-**File:** `data/accra_home_price_index.csv`
-**Shape:** 180 rows × 22 columns · Zero null values
+### 5.0 Files Overview
 
-### 5.1 Column Reference
+| File | Shape | Description |
+|------|-------|-------------|
+| `data/accra_home_price_index.csv` | 180 × 22 | Aggregate mid-market composite with all 20 macro regressors. Primary Prophet training file. |
+| `data/accra_district_prices.csv` | 900 × 5 | Per-district long-format. 5 districts × 180 months. Columns: `ds, district, y, price_ghs_per_sqm, price_usd_per_sqm` |
+| `data/accra_prime_prices.csv` | 1,080 × 5 | Per-prime-area long-format. 6 areas × 180 months. Same schema as district file. |
+
+### 5.1 Column Reference (Aggregate File)
 
 | Column | Unit | Role | Source |
 |--------|------|------|--------|
@@ -184,13 +239,15 @@ The most important insight from the AHPI is the **divergence between GHS and USD
 
 | Metric | Jan 2010 | Dec 2024 | Change |
 |--------|----------|----------|--------|
-| AHPI (GHS index) | 29.9 | 406.9 | **+1,261%** |
-| GHS/sqm | 1,048 | 14,272 | **+1,262%** |
-| USD/sqm | 733 | 984 | **+34%** |
+| AHPI composite (GHS index) | 29.9 | 419.7 | **+1,303%** |
+| GHS/sqm (mid-market avg) | 1,048 | 14,272 | **+1,262%** |
+| USD/sqm (mid-market avg) | 733 | 985 | **+34%** |
+| AHPI prime avg (GHS index) | 23.1 | 776.3 | **+3,264%** |
+| USD/sqm (prime avg) | 866 | 2,874 | **+232%** |
 | GHS/USD exchange rate | 1.43 | 14.50 | **+914%** |
 | CPI index (2010 = 100) | 100 | 757.8 | **+658%** |
 
-In hard currency, Accra's mid-market property appreciated by only **34% over 14 years** (~2.1% per annum in USD) — a modest return that barely keeps pace with US inflation. In local currency, the same properties appear to have gained 12× in value, but this is almost entirely attributable to the cedi's structural depreciation.
+In hard currency, Accra's **mid-market** property appreciated by only **34% over 14 years** (~2.1% per annum in USD) — a modest return that barely keeps pace with US inflation. In local currency, the same properties appear to have gained 14× in value, but this is almost entirely attributable to the cedi's structural depreciation. **Prime areas** are the exception: genuine USD appreciation of +232% reflects true real demand from a structurally supply-constrained, internationally connected market.
 
 ### 6.2 Four Distinct Eras
 
@@ -216,9 +273,93 @@ Ghana's fiscal health is tightly coupled to commodity export revenues, which in 
 
 ---
 
-## 7. Regressor Correlations
+## 7. Per-District Analysis
 
-Pearson correlations between each regressor and the AHPI (`y`), computed over all 180 monthly observations:
+### 7.1 District AHPI Summary (Jan 2010 → Dec 2024)
+
+| District | AHPI Jan 2010 | AHPI Dec 2024 | GHS change | USD/sqm Jan 2010 | USD/sqm Dec 2024 | USD change |
+|----------|:-------------:|:-------------:|:----------:|:----------------:|:----------------:|:----------:|
+| Spintex Road | 29.3 | 429.1 | +1,364% | 929 | 1,374 | +48% |
+| Adenta | 29.9 | 398.1 | +1,230% | 834 | 1,120 | +34% |
+| Tema | 30.8 | 392.6 | +1,176% | 713 | 923 | +29% |
+| Dome | 31.3 | 389.6 | +1,145% | 628 | 791 | +26% |
+| Kasoa | 26.3 | 489.1 | +1,762% | 382 | 716 | +88% |
+
+### 7.2 District Divergence Themes
+
+**Kasoa — The Peri-Urban Catch-Up Story**
+Kasoa had the lowest absolute price level in 2010 (USD 382/sqm, a 48% discount to the composite) and the fastest USD appreciation (+88%). This reflects the district's transformation from a peri-urban fringe into a fully developed residential corridor as the Greater Accra Metropolitan Area expanded westward. The widening base multiplier (+0.013/year) captures this structural convergence. Affordable entry point combined with strong appreciation makes Kasoa the highest-return mid-market district over the period.
+
+**Spintex Road — The Corridor Premium**
+Spintex entered 2010 at a 28% premium to the composite (USD 929/sqm) and widened that premium further (+0.008/year). The East Accra corridor's proximity to the Airport City commercial hub, good road infrastructure, and concentration of gated communities sustained its premium positioning. At USD 1,374/sqm (Dec 2024), it is the most expensive mid-market district.
+
+**Dome — The Stable Discount**
+Dome's discount to the composite widened steadily (−0.004/year), reflecting its dense urban character with limited new supply of high-quality stock and increasing competition from newer developments in Adenta and Spintex. At USD 791/sqm, it offers the lowest entry price among the established suburbs.
+
+**Tema — Industrial Moderation**
+Tema's proximity to the port and industrial zone maintained its position near the composite average, but a slight downward drift (−0.002/year) reflects the area's industrial character moderating residential demand relative to the purely residential suburbs.
+
+### 7.3 Within-Market Spread
+
+The spread between the highest-AHPI (Kasoa, 489.1) and lowest-AHPI (Dome, 389.6) district at December 2024 is **99.5 index points** — approximately **25% of the composite**. This spread has widened over time: in January 2010, the range was only 5.0 index points (31.3 to 26.3). The increasing within-market dispersion reflects neighbourhood differentiation as the Accra metropolitan area matures.
+
+---
+
+## 8. Prime Areas Index
+
+### 8.1 Prime AHPI Summary (Jan 2010 → Dec 2024)
+
+All six prime areas share one defining characteristic absent from the mid-market: their prices are quoted, negotiated, and paid in **US Dollars**. GHS appreciation in these areas is primarily a mechanical product of cedi depreciation applied to a USD-anchored series, but the USD appreciation itself is genuine and substantial.
+
+| Area | AHPI Jan 2010 | AHPI Dec 2024 | GHS change | USD/sqm Jan 2010 | USD/sqm Dec 2024 | USD change |
+|------|:-------------:|:-------------:|:----------:|:----------------:|:----------------:|:----------:|
+| East Legon | 23.2 | 851.5 | +3,573% | 805 | 2,980 | +270% |
+| Cantonments | 22.1 | 698.2 | +3,055% | 1,005 | 3,198 | +218% |
+| Airport Residential | 23.3 | 826.3 | +3,446% | 703 | 2,515 | +258% |
+| Labone / Roman Ridge | 24.3 | 778.5 | +3,098% | 609 | 1,963 | +222% |
+| Dzorwulu / Abelenkpe | 23.5 | 847.9 | +3,510% | 576 | 2,098 | +264% |
+| Trasacco Valley | 22.0 | 655.2 | +2,877% | 1,496 | 4,489 | +200% |
+| **Prime average** | **23.1** | **776.3** | **+3,264%** | **866** | **2,874** | **+232%** |
+
+### 8.2 Area-by-Area Insights
+
+**East Legon (AHPI 851.5 · USD 2,980/sqm)**
+Accra's highest-profile residential address and the strongest index performer. The area has transformed from a prestige suburb into a fully mixed-use luxury zone with high-end retail, offices, and diplomatic missions. Demand is driven by senior government officials, business elites, and returning diaspora. The +270% USD appreciation is the highest among the six areas.
+
+**Cantonments (AHPI 698.2 · USD 3,198/sqm)**
+Despite the lowest AHPI among the six (reflecting a flatter percentage gain from a high 2010 base of USD 1,005/sqm), Cantonments commands the second-highest absolute USD price. Its character as Accra's diplomatic and ministerial quarter limits supply to an extremely small number of large-plot estates, sustaining an elevated price floor.
+
+**Airport Residential (AHPI 826.3 · USD 2,515/sqm)**
+Airport proximity creates consistent demand from international business travellers, airline crews, and multinational tenants seeking short-term furnished accommodation. The +258% USD appreciation reflects the area's capture of the Accra corporate-stay premium.
+
+**Labone / Roman Ridge (AHPI 778.5 · USD 1,963/sqm)**
+Among the more affordable prime areas in absolute USD terms, Labone and Roman Ridge are established enclaves valued for their mature street trees, spacious plots, and proximity to the Cantonments cluster without the full diplomatic premium. Moderate USD appreciation (+222%) reflects steady organic demand rather than rapid commercial development.
+
+**Dzorwulu / Abelenkpe (AHPI 847.9 · USD 2,098/sqm)**
+Second only to East Legon in AHPI terms (+264% USD), Dzorwulu serves a concentrated professional-class and NGO community. Its location between the major employment centres of Airport City and Cantonments sustains strong rental demand and a consistent price premium.
+
+**Trasacco Valley (AHPI 655.2 · USD 4,489/sqm)**
+Trasacco is in a category of its own: the highest absolute USD price per sqm of any area tracked (USD 4,489 vs USD 3,198 for second-place Cantonments), but the lowest AHPI among prime areas. This reflects the **exceptionally high 2010 base** (USD 1,496/sqm, already 1.7× the composite prime price) and the ultra-luxury, gated estate model that limits both supply and the number of comparable transactions. The +200% USD gain is "modest" only relative to the other prime areas — it still far outpaces mid-market.
+
+### 8.3 Prime vs Mid-Market: Structural Comparison
+
+| Dimension | Mid-Market (composite) | Prime (average) | Ratio |
+|-----------|:---------------------:|:---------------:|:-----:|
+| AHPI Jan 2010 | 29.9 | 23.1 | — |
+| AHPI Dec 2024 | 419.7 | 776.3 | 1.8× |
+| USD/sqm Jan 2010 | 733 | 866 | 1.2× |
+| USD/sqm Dec 2024 | 985 | 2,874 | 2.9× |
+| USD appreciation 2010–24 | +34% | +232% | 6.8× |
+| GHS appreciation 2010–24 | +1,303% | +3,264% | 2.5× |
+| Seasonal peak-to-trough | ±2.5% | ±1.0% | — |
+
+The key structural difference is that **prime areas function as USD-denominated assets** held in a GHS-denominated country. Mid-market buyers transact in GHS and bear the full cedi depreciation risk. Prime buyers and sellers transact in USD; their GHS index appreciation is largely mechanical. Their **real** return (+232% USD) is genuine and reflects structural undersupply relative to international demand — a fundamentally different investment thesis.
+
+---
+
+## 9. Regressor Correlations
+
+Pearson correlations below are computed against the **aggregate mid-market AHPI** (`y`) over all 180 monthly observations. Prime areas follow a broadly similar macro pattern but with stronger gold and FDI correlations and weaker CPI pass-through.
 
 ### Positive correlations (AHPI rises with these)
 
@@ -248,7 +389,7 @@ Pearson correlations between each regressor and the AHPI (`y`), computed over al
 
 ---
 
-## 8. Stakeholders & Implications
+## 10. Stakeholders & Implications
 
 ### 8.1 Real Estate Developers & Construction Companies
 
@@ -348,13 +489,13 @@ Sum-insured values for property policies denominated in GHS will significantly u
 
 ---
 
-## 9. Limitations & Caveats
+## 11. Limitations & Caveats
 
 | Limitation | Detail |
 |------------|--------|
 | **No transaction database** | The AHPI is based on surveyed price estimates, not actual recorded transactions. Ghana has no mandatory public deed price register. |
 | **Sparse anchor data** | Price anchors are annual point-in-time estimates, not monthly observations. Monthly values between anchors are interpolated, not observed. |
-| **Mid-market only** | The index does not represent prime areas (East Legon, Cantonments) or very low-income areas (Ashaiman, Nima). Separate indices are needed for those segments. |
+| **Low-income areas excluded** | The index does not represent very low-income areas (Ashaiman, Nima). A separate index would be needed for those segments. Prime areas now have their own dedicated index (`accra_prime_prices.csv`). |
 | **Annual macro data** | Most World Bank indicators are reported annually. Monthly values are linearly interpolated, which smooths within-year volatility that undoubtedly exists. |
 | **Informal market excluded** | A substantial fraction of Accra's housing transactions are informal (no title, no agent). These transactions are not captured. |
 | **Single city** | The AHPI covers Greater Accra only. Kumasi, Takoradi, and other Ghanaian cities would require their own indices. |
@@ -362,9 +503,9 @@ Sum-insured values for property policies denominated in GHS will significantly u
 
 ---
 
-## 10. Using AHPI with Facebook Prophet
+## 12. Using AHPI with Facebook Prophet
 
-### Minimal working example
+### 12.1 Aggregate Mid-Market (with regressors)
 
 ```python
 from prophet import Prophet
@@ -393,7 +534,7 @@ future = m.make_future_dataframe(periods=24, freq="MS")
 forecast = m.predict(future)
 ```
 
-### Recommended preprocessing
+### 12.2 Recommended preprocessing
 
 ```python
 from sklearn.preprocessing import StandardScaler
@@ -403,7 +544,7 @@ scaler = StandardScaler()
 df[regressors] = scaler.fit_transform(df[regressors])
 ```
 
-### Suggested scenario regressors for 2025–2026 forecasting
+### 12.3 Suggested scenario regressors for 2025–2026 forecasting
 
 | Scenario | `exchange_rate_ghs_usd` | `inflation_cpi_pct` | `gold_price_usd` |
 |----------|------------------------|--------------------|--------------------|
@@ -411,9 +552,66 @@ df[regressors] = scaler.fit_transform(df[regressors])
 | **Base** (gradual stabilisation) | 14–16 | 18–22% | 2,100–2,400 |
 | **Bull** (cedi recovery on cocoa windfall) | 11–13 | 12–16% | 2,300–2,600 |
 
+### 12.4 Per-District Forecasting
+
+```python
+from prophet import Prophet
+import pandas as pd
+
+df = pd.read_csv("data/accra_district_prices.csv", parse_dates=["ds"])
+
+# Forecast one district at a time
+for district in df["district"].unique():
+    sub = df[df["district"] == district][["ds", "y"]].copy()
+
+    m = Prophet(
+        changepoints=["2014-01-01", "2022-01-01"],
+        changepoint_prior_scale=0.5,
+        seasonality_mode="multiplicative",
+    )
+    m.fit(sub)
+
+    future = m.make_future_dataframe(periods=24, freq="MS")
+    forecast = m.predict(future)
+    print(f"{district}: 2-year forecast end = {forecast['yhat'].iloc[-1]:.1f}")
+```
+
+> District models omit macro regressors (the per-district CSVs carry only price columns). For regressor-augmented district forecasts, join the district series on `ds` to the macro columns from `accra_home_price_index.csv`.
+
+### 12.5 Prime Areas Forecasting
+
+Prime area forecasts should account for the **USD-anchored** nature of pricing. Consider modelling in USD/sqm rather than the GHS-based AHPI if forward exchange-rate scenarios are uncertain:
+
+```python
+from prophet import Prophet
+import pandas as pd
+
+df = pd.read_csv("data/accra_prime_prices.csv", parse_dates=["ds"])
+
+# Model in USD/sqm for exchange-rate-neutral forecast
+area = "East Legon"
+sub = df[df["district"] == area][["ds", "price_usd_per_sqm"]].rename(
+    columns={"price_usd_per_sqm": "y"}
+)
+
+m = Prophet(
+    changepoints=["2014-01-01", "2022-01-01"],
+    changepoint_prior_scale=0.3,   # lower — prime prices are smoother
+    seasonality_mode="additive",   # ±1% flat swing suits additive better
+)
+m.fit(sub)
+
+future = m.make_future_dataframe(periods=24, freq="MS")
+forecast = m.predict(future)
+
+# Convert back to GHS using your forward exchange rate assumption
+forward_rate = 16.0  # example: 16 GHS/USD in 2026
+forecast["price_ghs_forecast"] = forecast["yhat"] * forward_rate
+```
+
 ---
 
-## 11. Data Sources
+## 13. Data Sources
 
 | Source | Data Provided | Access |
 |--------|--------------|--------|
@@ -431,5 +629,6 @@ df[regressors] = scaler.fit_transform(df[regressors])
 
 ---
 
-*Document generated: March 2026 · Dataset version: 1.0 · Index base year: 2015 = 100*
+*Document updated: March 2026 · Dataset version: 2.0 · Index base year: 2015 = 100*
+*Three datasets: aggregate mid-market (180 × 22), per-district (900 × 5), prime areas (1,080 × 5)*
 *AHPI is an estimated index for research and forecasting purposes. It should not be used as the sole basis for individual investment decisions.*
