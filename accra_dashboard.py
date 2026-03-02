@@ -10,6 +10,9 @@ Tabs
   Macro Drivers     – Selectable macroeconomic regressor panel with normalise toggle
   Commodities       – Gold, Brent oil, and Cocoa price time series
   Regressor Explorer– Scatter / correlation analysis between any two variables
+  Districts         – Per-district mid-market AHPI (compare all or drill into one)
+  Prime Areas       – Per-prime-area AHPI (compare all or drill into one)
+  Map               – Interactive OpenStreetMap of all 11 locations with hover metrics
 
 Run
 ---
@@ -113,6 +116,43 @@ PRIME_COLORS = {
     "Dzorwulu / Abelenkpe": "#79c0ff",   # sky blue
     "Trasacco Valley":      "#f0883e",   # amber
 }
+
+# ── geographic coordinates (lat, lon) ─────────────────────────────────────────
+DISTRICT_COORDS: dict[str, tuple[float, float]] = {
+    "Spintex Road": (5.620, -0.128),
+    "Adenta":       (5.712, -0.168),
+    "Tema":         (5.668,  0.017),
+    "Dome":         (5.650, -0.235),
+    "Kasoa":        (5.534, -0.420),
+}
+
+PRIME_COORDS: dict[str, tuple[float, float]] = {
+    "East Legon":           (5.636, -0.151),
+    "Cantonments":          (5.587, -0.186),
+    "Airport Residential":  (5.605, -0.166),
+    "Labone / Roman Ridge": (5.574, -0.174),
+    "Dzorwulu / Abelenkpe": (5.597, -0.210),
+    "Trasacco Valley":      (5.662, -0.135),
+}
+
+# Pre-compute Jan 2010 → Dec 2024 snapshots for map hover tooltips
+def _make_snapshots(df: pd.DataFrame) -> dict:
+    first = df.groupby("district").first()
+    last  = df.groupby("district").last()
+    out: dict = {}
+    for loc in last.index:
+        usd0 = first.loc[loc, "price_usd_per_sqm"]
+        usd1 = last.loc[loc, "price_usd_per_sqm"]
+        out[loc] = dict(
+            ahpi    = last.loc[loc, "y"],
+            ghs_sqm = last.loc[loc, "price_ghs_per_sqm"],
+            usd_sqm = usd1,
+            usd_pct = (usd1 - usd0) / usd0 * 100,
+        )
+    return out
+
+DISTRICT_SNAP = _make_snapshots(DF_DISTRICT)
+PRIME_SNAP    = _make_snapshots(DF_PRIME)
 
 COMMODITY_META = {
     "gold_price_usd":   ("Gold (USD / troy oz)",  C["gold"],   "left"),
@@ -796,6 +836,74 @@ def build_prime_price_table(yr_range):
     )
 
 
+# ── map figure ────────────────────────────────────────────────────────────────
+def build_map_fig(segment: str = "both") -> go.Figure:
+    """Interactive open-street-map showing district / prime area locations."""
+    fig = go.Figure()
+
+    def _traces(coords: dict, snap: dict, colors: dict,
+                group: str, gtitle: str) -> None:
+        first = True
+        for name, (lat, lon) in coords.items():
+            info = snap[name]
+            # Scale marker size by AHPI (range ~390–850 across both segments)
+            size = max(14, min(44, 10 + info["ahpi"] / 900 * 36))
+            fig.add_trace(go.Scattermap(
+                lat=[lat], lon=[lon],
+                mode="markers",
+                marker=dict(size=size, color=colors[name], opacity=0.88),
+                name=name,
+                customdata=[[
+                    info["ahpi"], info["ghs_sqm"],
+                    info["usd_sqm"], info["usd_pct"],
+                ]],
+                hovertemplate=(
+                    f"<b>{name}</b><br>"
+                    "AHPI Dec 2024: <b>%{customdata[0]:.1f}</b><br>"
+                    "GHS / sqm: <b>%{customdata[1]:,.0f}</b><br>"
+                    "USD / sqm: <b>%{customdata[2]:,.0f}</b><br>"
+                    "USD gain 2010–24: <b>+%{customdata[3]:.0f}%%</b>"
+                    "<extra></extra>"
+                ),
+                legendgroup=group,
+                legendgrouptitle_text=gtitle if first else "",
+            ))
+            first = False
+
+    if segment in ("mid", "both"):
+        _traces(DISTRICT_COORDS, DISTRICT_SNAP, DISTRICT_COLORS,
+                group="mid", gtitle="Mid-Market Districts")
+    if segment in ("prime", "both"):
+        _traces(PRIME_COORDS, PRIME_SNAP, PRIME_COLORS,
+                group="prime", gtitle="Prime Areas")
+
+    fig.update_layout(
+        paper_bgcolor=C["card"],
+        font=dict(family="'Inter', 'Segoe UI', Arial, sans-serif",
+                  color=C["text"], size=11),
+        hovermode="closest",
+        hoverlabel=dict(bgcolor=C["hover"], font_color=C["text"],
+                        bordercolor=C["border"], namelength=-1),
+        map=dict(
+            style="open-street-map",
+            center=dict(lat=5.610, lon=-0.195),
+            zoom=9.5,
+        ),
+        legend=dict(
+            bgcolor="rgba(22,27,34,0.88)",
+            bordercolor=C["border"],
+            borderwidth=1,
+            font=dict(size=11, color=C["text"]),
+            orientation="v",
+            x=0.01, y=0.99,
+            tracegroupgap=8,
+        ),
+        margin=dict(l=0, r=0, t=0, b=0),
+        height=560,
+    )
+    return fig
+
+
 # ── reusable layout pieces ────────────────────────────────────────────────────
 def kpi_card(label, val_id, icon, color=C["gold"]):
     return dbc.Col(
@@ -1096,6 +1204,49 @@ tab_prime = html.Div([
     ),
 ])
 
+# ── tab: Map ──────────────────────────────────────────────────────────────────
+tab_map = html.Div([
+    section_card(
+        dbc.Row([
+            dbc.Col([
+                html.Label("Show locations", style={"fontSize": "0.78rem",
+                                                    "color": C["muted"]}),
+                dbc.RadioItems(
+                    id="map-segment",
+                    options=[
+                        {"label": "Mid-Market Districts", "value": "mid"},
+                        {"label": "Prime Areas",          "value": "prime"},
+                        {"label": "Both",                 "value": "both"},
+                    ],
+                    value="both",
+                    inline=True,
+                    className="mt-1",
+                    inputStyle={"marginRight": "4px"},
+                    labelStyle={"marginRight": "16px", "fontSize": "0.82rem",
+                                "color": C["text"]},
+                ),
+            ], md=7),
+            dbc.Col([
+                html.Div(
+                    "Marker size reflects Dec 2024 AHPI. Scroll or pinch to zoom.",
+                    style={"fontSize": "0.72rem", "color": C["muted"],
+                           "paddingTop": "10px"},
+                ),
+            ], md=5),
+        ], className="mb-2"),
+        dcc.Graph(
+            id="map-chart",
+            config={
+                "scrollZoom": True,
+                "displayModeBar": True,
+                "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+                "toImageButtonOptions": {"scale": 2},
+            },
+            style={"height": "560px"},
+        ),
+    ),
+])
+
 # ── app layout ────────────────────────────────────────────────────────────────
 app = dash.Dash(
     __name__,
@@ -1175,6 +1326,9 @@ app.layout = html.Div(
                         label_style={"color": C["muted"], "fontSize": "0.85rem"},
                         active_label_style={"color": C["gold"], "fontWeight": "600"}),
                 dbc.Tab(tab_prime,      label="Prime Areas",         tab_id="tab-prime",
+                        label_style={"color": C["muted"], "fontSize": "0.85rem"},
+                        active_label_style={"color": C["gold"], "fontWeight": "600"}),
+                dbc.Tab(tab_map,        label="Map",                 tab_id="tab-map",
                         label_style={"color": C["muted"], "fontSize": "0.85rem"},
                         active_label_style={"color": C["gold"], "fontWeight": "600"}),
             ], id="main-tabs", active_tab="tab-overview",
@@ -1391,6 +1545,15 @@ def update_prime(yr_range, area, show_events):
         dff_single = dff[dff["district"] == area]
         fig = build_prime_single_fig(dff_single, area)
     return fig, build_prime_price_table(yr_range)
+
+
+@app.callback(
+    Output("map-chart", "figure"),
+    Input("map-segment", "value"),
+    prevent_initial_call=False,
+)
+def update_map(segment):
+    return build_map_fig(segment or "both")
 
 
 # ── run ───────────────────────────────────────────────────────────────────────
