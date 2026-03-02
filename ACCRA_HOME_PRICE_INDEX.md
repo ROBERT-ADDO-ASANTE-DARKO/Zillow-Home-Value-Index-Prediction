@@ -391,101 +391,136 @@ Pearson correlations below are computed against the **aggregate mid-market AHPI*
 
 ## 10. Stakeholders & Implications
 
-### 8.1 Real Estate Developers & Construction Companies
+### 10.1 Real Estate Developers & Construction Companies
 
-**What the AHPI tells them:**
-The 14× nominal GHS rise in prices masks near-flat real (USD) appreciation. Construction material costs are largely dollar-linked (cement, steel, glass), which means **building in Ghana today is more expensive in GHS terms than ever**, yet the USD sales price has not kept pace. Developers face a cost-price squeeze in hard-currency terms.
+**Mid-market (AHPI composite / district indices):**
+The 14× nominal GHS rise in prices masks near-flat real (USD) appreciation (+34%). Construction material costs are largely dollar-linked (cement, steel, glass), which means **building in Ghana today is more expensive in GHS terms than ever**, yet the mid-market USD sale price has not kept pace. Developers face a cost-price squeeze in hard-currency terms.
+
+**Prime areas (prime AHPI):**
+The picture is more attractive: prime USD/sqm grew +232% over the same period, meaning sale prices have more than doubled in real terms. Developers who can control land in East Legon, Dzorwulu, or Airport Residential and sell at prime USD rates benefit from a margin structure unavailable in the mid-market.
 
 **Actionable insight:**
-- Sell and receive payments in USD or index contracts to the exchange rate
-- Time new projects during cedi stability windows (periods of strong gold/cocoa prices)
-- Prioritise affordable mid-market segments in Kasoa and Dome where land costs are lower
+- Mid-market: sell in USD or index contracts to the exchange rate; time projects during cedi stability windows; prioritise Kasoa and Dome where land costs remain low
+- Prime: East Legon and Dzorwulu/Abelenkpe offer the best combination of appreciation (+264–270% USD) and transaction liquidity; Trasacco Valley's ultra-luxury model requires patient capital but commands the highest absolute price (USD 4,489/sqm)
+- Use the per-district index (`accra_district_prices.csv`) to benchmark which district offers the strongest current margin relative to construction cost
 
 ---
 
-### 8.2 Commercial and Retail Banks / Mortgage Lenders
+### 10.2 Commercial and Retail Banks / Mortgage Lenders
 
-**What the AHPI tells them:**
+**Mid-market:**
 With lending rates at 25–31% and AHPI growing at a similar nominal rate, **mortgage affordability is structurally broken** for most Ghanaian households. The 2022–2024 AHPI spike was driven by depreciation, not income growth — meaning collateral values have risen nominally but buyers' repayment capacity has not.
 
+**Prime areas:**
+Prime property collateral is effectively USD-denominated. A GHS mortgage secured on a Cantonments property priced at USD 3,198/sqm carries a fundamentally different risk profile: cedi depreciation inflates the collateral's GHS value, cushioning LTV ratios even as it erodes the borrower's GHS repayment capacity. Banks should model these two segments separately.
+
 **Actionable insight:**
-- Stress-test mortgage books against further cedi depreciation scenarios
-- Develop foreign-currency mortgage products for diaspora buyers
-- Use the AHPI forecast as a leading indicator for non-performing loan risk in the housing portfolio
+- Stress-test mid-market mortgage books against further cedi depreciation scenarios using the composite AHPI forecast
+- For prime-area lending, consider USD-indexed mortgage products — the prime AHPI's high gold correlation (+0.786 for mid-market; likely higher for prime) can inform hedging strategies
+- Use the district AHPI to set location-specific LTV caps: Kasoa's strong USD appreciation (+88%) supports higher LTVs than Dome (+26%)
+- Use AHPI forecasts as a leading indicator for non-performing loan risk in the housing portfolio
 
 ---
 
-### 8.3 Diaspora Investors (Ghanaians Abroad)
+### 10.3 Diaspora Investors (Ghanaians Abroad)
 
-**What the AHPI tells them:**
-In USD terms, Accra mid-market property has appreciated only **+34% over 14 years** — a weak return compared to equities or even savings rates in developed markets. However, **purchasing in USD while rents and resale values are denominated in GHS** gives diaspora buyers natural exposure to the cedi's depreciation recovery. If the cedi stabilises (as cocoa revenues suggest it may), USD-denominated buyers will benefit disproportionately.
+**Mid-market:**
+In USD terms, mid-market property appreciated only **+34% over 14 years** — a weak return. However, **purchasing in USD while rents and resale values are denominated in GHS** provides natural exposure to a cedi recovery. If the cedi stabilises on the back of the 2024 cocoa windfall, USD-based buyers benefit disproportionately.
+
+**Prime areas:**
+The prime index reframes the conversation entirely. East Legon (+270% USD), Airport Residential (+258%), and Dzorwulu (+264%) delivered returns competitive with developed-market equities. These are the segments diaspora investors with USD capital should be comparing to offshore alternatives — not the mid-market composite.
 
 **Actionable insight:**
-- Buy during cedi weakness (high AHPI phases) for best entry in USD terms
-- Spintex Road and Adenta offer the best combination of liquidity and yield
-- Monitor `remittances_pct_gdp` and `gold_price_usd` as forward indicators
+- For capital appreciation: target prime areas, particularly East Legon and Dzorwulu, where USD appreciation has been strongest and supply remains structurally constrained
+- For yield + affordability: Spintex Road and Adenta offer the best mid-market combination of liquidity and rental income
+- Entry timing: buy mid-market during high-AHPI (weak cedi) periods for best USD entry price; prime-market entry is less sensitive to the cedi cycle since pricing is USD-anchored
+- Monitor `gold_price_usd` and `remittances_pct_gdp` as forward indicators for both segments
 
 ---
 
-### 8.4 Institutional Investors & Private Equity (Real Estate Funds)
+### 10.4 Institutional Investors & Private Equity (Real Estate Funds)
 
-**What the AHPI tells them:**
-The near-zero real return (+34% USD in 14 years) suggests Accra mid-market residential is not a strong capital appreciation play for USD-denominated funds. The value proposition lies in **rental yield** (typically 8–12% gross in prime areas, 6–9% in mid-market) rather than price appreciation, and in **development margins** when construction costs are managed.
+**Mid-market:**
+The near-flat real return (+34% USD in 14 years) means mid-market residential is not a capital appreciation play for USD funds. Value lies in **development yield** (affordable housing gap) and **rental income** rather than price appreciation.
+
+**Prime areas:**
+The prime index changes the calculus for USD-denominated funds. A +232% real USD return over 14 years (~8.8% annualised in USD) is a compelling long-term capital appreciation story, especially for funds with 7–10 year horizons. Rental yields in prime areas (typically 8–12% gross) add further return on top of appreciation.
 
 **Actionable insight:**
-- Use the AHPI forecast to plan fund-entry and exit timing relative to macro cycles
-- Hedge GHS exposure through currency swaps or USD-indexed leases
-- Track the `fdi_pct_gdp` and `credit_private_pct_gdp` regressors as leading indicators of investment climate
+- Allocate capital appreciation mandates to prime areas (East Legon, Airport Residential, Dzorwulu); allocate yield mandates to mid-market (Spintex, Adenta)
+- The 2.9× USD/sqm premium of prime over mid-market (USD 2,874 vs USD 985) implies a wide margin for mixed-income fund structures that can develop at mid-market cost and sell at prime prices with location repositioning
+- Hedge GHS exposure through USD-indexed leases (standard practice in prime Accra)
+- Use `fdi_pct_gdp` and `credit_private_pct_gdp` as leading indicators of the investment climate cycle
 
 ---
 
-### 8.5 Government & Housing Policy Makers (Ministry of Works & Housing, NHC)
+### 10.5 Government & Housing Policy Makers (Ministry of Works & Housing, NHC)
 
-**What the AHPI tells them:**
-Ghana faces a **housing deficit of approximately 1.8 million units** (Ghana Statistical Service), with affordability worsening each year as nominal prices outpace wage growth. The AHPI shows that **the problem is not insufficient construction activity — it is currency instability making construction inputs unaffordable** for low- and middle-income households.
+**Mid-market / district indices:**
+Ghana faces a **housing deficit of approximately 1.8 million units** (Ghana Statistical Service), with affordability worsening as nominal prices outpace wage growth. The AHPI shows that the affordability crisis is driven by **currency instability inflating construction input costs**, not a shortage of developer interest. The per-district data reveals that Kasoa offers the most affordable entry point (GHS 10,156/sqm) with the fastest real appreciation — making it the strongest candidate for mass-housing programme targeting.
+
+**Prime areas:**
+The prime index illustrates the widening two-tier market: prime USD/sqm (USD 2,874) is now **2.9× mid-market** (USD 985), up from a 1.2× ratio in 2010. Without policy intervention, the market is bifurcating into a USD-denominated enclave for elites and a structurally depreciating GHS market for everyone else.
 
 **Actionable insight:**
-- Index social housing subsidy amounts to the AHPI to prevent real-value erosion
-- Use AHPI forecasts to calibrate the National Housing Fund's mortgage subsidy rates
-- Target Kasoa and Tema for mass housing programmes where land costs are lowest
-- Implement exchange-rate stabilisation as a housing affordability measure
+- Index social housing subsidy amounts to the mid-market AHPI to prevent real-value erosion
+- Use AHPI district forecasts to calibrate National Housing Fund mortgage subsidy rates by location — Kasoa rates should differ from Spintex rates
+- Target Kasoa (lowest GHS/sqm at 10,156) and Tema (well-serviced industrial satellite) for mass housing programmes
+- Consider a **prime-area uplift levy** on transactions above USD 2,000/sqm to cross-subsidise affordable housing development
+- Implement exchange-rate stabilisation as the single most impactful housing affordability measure (given the 0.991 FX–AHPI correlation)
 
 ---
 
-### 8.6 Bank of Ghana (Monetary Policy Committee)
+### 10.6 Bank of Ghana (Monetary Policy Committee)
 
-**What the AHPI tells them:**
-The 0.991 correlation between the exchange rate and the AHPI is a direct transmission mechanism: **cedi depreciation immediately inflates the GHS price of housing**, which feeds into shelter components of the CPI, creating a self-reinforcing inflation spiral. Housing is not a passive bystander in Ghana's inflation problem.
+**Mid-market:**
+The 0.991 correlation between the exchange rate and the mid-market AHPI is a direct transmission mechanism: **cedi depreciation immediately inflates the GHS price of housing**, which feeds into shelter components of the CPI, creating a self-reinforcing inflation spiral.
+
+**Prime areas:**
+The prime market adds a second transmission channel. As the GHS/USD rate falls, prime-area GHS prices spike mechanically (+3,264% vs +1,303% for mid-market over 2010–2024). Wealthy households who transact in both markets use prime property as an inflation hedge, which increases USD demand, further pressuring the cedi. The two-way reinforcement between cedi weakness, AHPI spikes, and USD hoarding is visible in both index series.
 
 **Actionable insight:**
-- Incorporate AHPI trends into the monetary policy transmission analysis
-- Use the AHPI as a near-real-time proxy for shelter inflation between formal CPI releases
-- Monitor `broad_money_pct_gdp` (+0.813 correlation) as a leading indicator of AHPI acceleration
+- Incorporate both mid-market and prime AHPI trends into monetary policy transmission analysis
+- Use the mid-market AHPI as a near-real-time proxy for shelter inflation between formal CPI releases
+- The divergence between prime and mid-market AHPI growth rates (3,264% vs 1,303%) is itself a measure of **wealth inequality amplified by monetary instability** — a secondary input to social stability assessments
+- Monitor `broad_money_pct_gdp` (+0.813 mid-market correlation) as a leading indicator of AHPI acceleration
 
 ---
 
-### 8.7 Researchers & Data Scientists (Prophet Forecasting)
+### 10.7 Researchers & Data Scientists (Prophet Forecasting)
 
-**What the AHPI tells them:**
-The dataset is structured for immediate use with **Facebook Prophet** (`ds`, `y`, and 20 additional regressors). The dominant regressors by correlation are `exchange_rate_ghs_usd`, `cpi_index`, and `urban_pop_pct`. The series contains **two structural breaks** (2014 cedi crisis; 2022 debt crisis) that Prophet's changepoint detection should identify automatically, but manual changepoints at `2014-01-01` and `2022-01-01` are recommended for robustness.
+**Mid-market aggregate:**
+The dataset is structured for immediate use with **Facebook Prophet** (`ds`, `y`, and 20 regressors). The dominant regressors by correlation are `exchange_rate_ghs_usd` (+0.991), `cpi_index` (+0.986), and `urban_pop_pct` (+0.871). Two structural breaks (2014 cedi crisis; 2022 debt crisis) are recommended as manual changepoints.
+
+**Per-district models:**
+Each district is normalised to its own 2015=100 base, so district AHPI levels are directly comparable cross-sectionally. The district series carry no macro regressors — join on `ds` to the aggregate file for regressor-augmented modelling. Kasoa's high `annual_drift` (+0.013/year) creates a stronger trend component; consider a higher `changepoint_prior_scale` for that district.
+
+**Prime areas:**
+Prime series have a flatter seasonal pattern (±1.0% vs ±2.5%) and stronger USD-appreciation signal. Modelling in USD/sqm before GHS conversion decouples the trend from exchange-rate noise and is recommended when the forecast horizon extends beyond 12 months. Prime models benefit from lower `changepoint_prior_scale` (suggested: 0.3 vs 0.5 for mid-market) given smoother underlying dynamics.
 
 **Actionable insight:**
-- Standardise regressors before fitting (wide variance ranges across columns)
+- Standardise all regressors before fitting (wide variance ranges across columns)
 - Add Prophet changepoints: `changepoints=['2014-01-01', '2022-01-01']`
-- Use `add_regressor('exchange_rate_ghs_usd')` as the primary external driver
-- Consider a log-transformation of `y` to stabilise variance in the 2022–2024 spike
+- Use `add_regressor('exchange_rate_ghs_usd')` as the primary external driver for mid-market
+- For prime areas, consider `add_regressor('gold_price_usd')` as the primary driver (stronger FDI and gold linkage)
+- Consider a log-transformation of `y` to stabilise variance in the 2022–2024 spike (both mid-market and prime)
+- Three datasets × three scenario assumptions = nine forecast paths for comprehensive scenario analysis
 
 ---
 
-### 8.8 Insurance Companies (Property & Casualty Underwriters)
+### 10.8 Insurance Companies (Property & Casualty Underwriters)
 
-**What the AHPI tells them:**
-Sum-insured values for property policies denominated in GHS will significantly understate replacement cost if not updated annually against the AHPI. The 1,261% GHS appreciation over 14 years means a policy written in 2010 at a GHS-denominated value would cover only **8% of today's replacement cost** without adjustment.
+**Mid-market:**
+Sum-insured values denominated in GHS will significantly understate replacement cost if not updated annually. The composite AHPI grew +1,303% over 14 years — a policy written in 2010 at its then-GHS value would cover only **7% of today's replacement cost** without indexation.
+
+**Prime areas:**
+The prime AHPI grew +3,264% over the same period — more than double the mid-market rate. A prime property insured in GHS terms without indexation faces even more severe underinsurance. However, since prime construction and finishing costs are largely USD-linked (imported materials, international contractors), the correct sum-insured benchmark for prime properties is the **USD replacement cost**, not the GHS AHPI.
 
 **Actionable insight:**
-- Embed automatic AHPI-linked indexation clauses in long-term property policies
-- Use AHPI forecasts to anticipate claims inflation in major depreciation years
-- Require USD-denominated reinstatement values for commercial and high-value residential policies
+- Mid-market: embed automatic mid-market AHPI-linked indexation clauses in long-term GHS-denominated property policies
+- Prime: require USD-denominated reinstatement values; use the prime AHPI as a secondary cross-check on reasonableness
+- Use AHPI forecasts to anticipate claims inflation in major cedi depreciation years — the 2022 spike from AHPI 145 → 250 in 18 months represents the kind of claims inflation event that should be in catastrophe models
+- Segment underwriting books by district (using the per-district index) to set location-specific premium rates that reflect actual price appreciation rates
 
 ---
 
