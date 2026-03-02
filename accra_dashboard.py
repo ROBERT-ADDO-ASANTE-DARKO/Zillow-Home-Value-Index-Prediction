@@ -35,8 +35,14 @@ DATA_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "data", "accra_home_price_index.csv",
 )
+DISTRICT_DATA_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "data", "accra_district_prices.csv",
+)
 DF = pd.read_csv(DATA_PATH, parse_dates=["ds"])
+DF_DISTRICT = pd.read_csv(DISTRICT_DATA_PATH, parse_dates=["ds"])
 YEARS = list(range(DF["ds"].dt.year.min(), DF["ds"].dt.year.max() + 1))
+DISTRICTS = DF_DISTRICT["district"].unique().tolist()
 
 # ── palette ───────────────────────────────────────────────────────────────────
 C = {
@@ -69,6 +75,14 @@ MACRO_META = {
     "gross_capital_form_pct": ("Gross Capital Formation (%)",  "#26c6da"),
     "broad_money_pct_gdp":    ("Broad Money M2 (% GDP)",       "#607d8b"),
     "gdp_per_capita_usd":     ("GDP per Capita (USD)",         C["green"]),
+}
+
+DISTRICT_COLORS = {
+    "Spintex Road": "#58a6ff",   # blue
+    "Adenta":       "#3fb950",   # green
+    "Tema":         "#d4a017",   # gold
+    "Dome":         "#bc8cff",   # purple
+    "Kasoa":        "#ffa657",   # orange
 }
 
 COMMODITY_META = {
@@ -118,6 +132,17 @@ BASE_LEGEND = dict(bgcolor="rgba(0,0,0,0)", bordercolor=C["border"],
 # ── helpers ───────────────────────────────────────────────────────────────────
 def filter_df(start_yr, end_yr):
     return DF[(DF["ds"].dt.year >= start_yr) & (DF["ds"].dt.year <= end_yr)].copy()
+
+
+def filter_df_district(start_yr, end_yr, district="all"):
+    mask = (
+        (DF_DISTRICT["ds"].dt.year >= start_yr) &
+        (DF_DISTRICT["ds"].dt.year <= end_yr)
+    )
+    dff = DF_DISTRICT[mask].copy()
+    if district != "all":
+        dff = dff[dff["district"] == district]
+    return dff
 
 
 def add_event_lines(fig, dff):
@@ -443,6 +468,133 @@ def build_heatmap_fig(dff):
     return fig
 
 
+def build_district_comparison_fig(dff, show_events=True):
+    """Overlay all five district AHPI lines on a single chart."""
+    fig = go.Figure()
+    for district in DISTRICTS:
+        d = dff[dff["district"] == district]
+        if d.empty:
+            continue
+        fig.add_trace(go.Scatter(
+            x=d["ds"], y=d["y"],
+            line=dict(color=DISTRICT_COLORS[district], width=2),
+            name=district,
+            hovertemplate=f"{district}: %{{y:.1f}}<extra></extra>",
+        ))
+
+    fig.add_hline(y=100, line_dash="dot", line_color=C["muted"],
+                  line_width=0.9, opacity=0.5,
+                  annotation_text="2015 baseline",
+                  annotation_font_color=C["muted"],
+                  annotation_font_size=9)
+    fig.update_layout(
+        BASE_LAYOUT,
+        xaxis=BASE_XAXIS,
+        yaxis=dict(**BASE_YAXIS, title="Index (2015 = 100)"),
+        legend=dict(**BASE_LEGEND, orientation="h", x=0.01, y=1.06),
+        title=dict(text="<b>AHPI by District</b>  — all five mid-market areas (2015 = 100 per district)",
+                   font_size=14, x=0.01),
+        height=460,
+    )
+    if show_events:
+        add_event_lines(fig, dff)
+    return fig
+
+
+def build_district_single_fig(dff, district):
+    """Area chart for one district's AHPI + GHS/sqm and USD/sqm overlays."""
+    color = DISTRICT_COLORS.get(district, C["gold"])
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=dff["ds"], y=dff["y"],
+        fill="tozeroy",
+        fillcolor=f"rgba({int(color[1:3],16)},{int(color[3:5],16)},{int(color[5:7],16)},0.12)",
+        line=dict(color=color, width=2.5),
+        name=f"AHPI – {district}",
+        hovertemplate="%{y:.1f}<extra>AHPI</extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=dff["ds"], y=dff["price_ghs_per_sqm"],
+        line=dict(color=C["green"], width=1.6, dash="dash"),
+        name="GHS / sqm",
+        yaxis="y2",
+        hovertemplate="GHS %{y:,.0f}<extra>GHS/sqm</extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=dff["ds"], y=dff["price_usd_per_sqm"],
+        line=dict(color=C["blue"], width=1.6, dash="dot"),
+        name="USD / sqm",
+        yaxis="y3",
+        hovertemplate="$%{y:,.0f}<extra>USD/sqm</extra>",
+    ))
+    fig.add_hline(y=100, line_dash="dot", line_color=C["muted"],
+                  line_width=0.9, opacity=0.5,
+                  annotation_text="2015 baseline",
+                  annotation_font_color=C["muted"],
+                  annotation_font_size=9)
+    fig.update_layout(
+        BASE_LAYOUT,
+        xaxis=BASE_XAXIS,
+        yaxis=dict(**BASE_YAXIS, title="Index (2015 = 100)"),
+        yaxis2=dict(title=dict(text="GHS / sqm", font=dict(color=C["green"])),
+                    overlaying="y", side="right",
+                    showgrid=False, tickformat=",",
+                    tickfont=dict(color=C["green"], size=10)),
+        yaxis3=dict(title=dict(text="USD / sqm", font=dict(color=C["blue"])),
+                    overlaying="y", side="right",
+                    anchor="free", position=0.97, showgrid=False,
+                    tickfont=dict(color=C["blue"], size=10)),
+        legend=dict(**BASE_LEGEND, orientation="h", x=0.01, y=1.06),
+        title=dict(text=f"<b>AHPI — {district}</b>  (GHS-denominated, base 2015 = 100)",
+                   font_size=14, x=0.01),
+        height=460,
+    )
+    add_event_lines(fig, dff)
+    return fig
+
+
+def build_district_price_table(yr_range):
+    """Summary table: latest GHS/sqm and USD/sqm per district."""
+    dff = filter_df_district(*yr_range)
+    latest_date = dff["ds"].max()
+    rows = []
+    for district in DISTRICTS:
+        row = dff[(dff["district"] == district) & (dff["ds"] == latest_date)]
+        if row.empty:
+            continue
+        r = row.iloc[0]
+        dot = html.Span("●", style={"color": DISTRICT_COLORS[district],
+                                    "marginRight": "6px", "fontSize": "1.1rem"})
+        rows.append(html.Tr([
+            html.Td([dot, district],
+                    style={"color": C["text"], "fontWeight": "600", "padding": "6px 12px"}),
+            html.Td(f"{r['y']:.1f}",
+                    style={"color": C["gold"], "textAlign": "right", "padding": "6px 12px"}),
+            html.Td(f"GHS {r['price_ghs_per_sqm']:,.0f}",
+                    style={"color": C["green"], "textAlign": "right", "padding": "6px 12px"}),
+            html.Td(f"${r['price_usd_per_sqm']:,.0f}",
+                    style={"color": C["blue"], "textAlign": "right", "padding": "6px 12px"}),
+        ]))
+    header = html.Tr([
+        html.Th("District",   style={"color": C["muted"], "padding": "6px 12px",
+                                     "borderBottom": f"1px solid {C['border']}"}),
+        html.Th("AHPI",       style={"color": C["muted"], "textAlign": "right",
+                                     "padding": "6px 12px",
+                                     "borderBottom": f"1px solid {C['border']}"}),
+        html.Th("GHS / sqm",  style={"color": C["muted"], "textAlign": "right",
+                                     "padding": "6px 12px",
+                                     "borderBottom": f"1px solid {C['border']}"}),
+        html.Th("USD / sqm",  style={"color": C["muted"], "textAlign": "right",
+                                     "padding": "6px 12px",
+                                     "borderBottom": f"1px solid {C['border']}"}),
+    ])
+    return html.Table(
+        [html.Thead(header), html.Tbody(rows)],
+        style={"width": "100%", "fontSize": "0.85rem", "borderCollapse": "collapse"},
+    )
+
+
 # ── reusable layout pieces ────────────────────────────────────────────────────
 def kpi_card(label, val_id, icon, color=C["gold"]):
     return dbc.Col(
@@ -635,6 +787,43 @@ tab_explorer = html.Div([
     ),
 ])
 
+# ── tab: Districts ────────────────────────────────────────────────────────────
+tab_districts = html.Div([
+    section_card(
+        dbc.Row([
+            dbc.Col([
+                html.Label("Select district", style={"fontSize": "0.78rem",
+                                                      "color": C["muted"]}),
+                dcc.Dropdown(
+                    id="district-selector",
+                    options=(
+                        [{"label": "Compare All Districts", "value": "all"}] +
+                        [{"label": d, "value": d} for d in DISTRICTS]
+                    ),
+                    value="all",
+                    clearable=False,
+                    style={"backgroundColor": C["bg"], "color": C["text"],
+                           "fontSize": "0.82rem"},
+                ),
+            ], md=4),
+            dbc.Col([
+                html.Label("Key events", style={"fontSize": "0.78rem",
+                                                "color": C["muted"]}),
+                dbc.Switch(id="district-events", value=True, label=""),
+            ], md=2, className="d-flex flex-column justify-content-start"),
+        ], className="mb-2"),
+        dcc.Graph(id="district-chart",
+                  config={"displayModeBar": True,
+                          "modeBarButtonsToRemove": ["lasso2d"],
+                          "toImageButtonOptions": {"scale": 2}}),
+    ),
+    section_card(
+        html.P("Latest values (end of selected date range)",
+               style={"color": C["muted"], "fontSize": "0.78rem", "marginBottom": "10px"}),
+        html.Div(id="district-price-table"),
+    ),
+])
+
 # ── app layout ────────────────────────────────────────────────────────────────
 app = dash.Dash(
     __name__,
@@ -708,6 +897,9 @@ app.layout = html.Div(
                         label_style={"color": C["muted"], "fontSize": "0.85rem"},
                         active_label_style={"color": C["gold"], "fontWeight": "600"}),
                 dbc.Tab(tab_explorer,    label="Regressor Explorer",  tab_id="tab-explorer",
+                        label_style={"color": C["muted"], "fontSize": "0.85rem"},
+                        active_label_style={"color": C["gold"], "fontWeight": "600"}),
+                dbc.Tab(tab_districts,  label="Districts",           tab_id="tab-districts",
                         label_style={"color": C["muted"], "fontSize": "0.85rem"},
                         active_label_style={"color": C["gold"], "fontWeight": "600"}),
             ], id="main-tabs", active_tab="tab-overview",
@@ -861,6 +1053,24 @@ def update_scatter(yr_range, x_var, y_var):
 )
 def update_heatmap(yr_range):
     return build_heatmap_fig(filter_df(*yr_range))
+
+
+@app.callback(
+    Output("district-chart",       "figure"),
+    Output("district-price-table", "children"),
+    Input("year-range",         "value"),
+    Input("district-selector",  "value"),
+    Input("district-events",    "value"),
+    prevent_initial_call=False,
+)
+def update_district(yr_range, district, show_events):
+    dff = filter_df_district(*yr_range)
+    if district == "all":
+        fig = build_district_comparison_fig(dff, show_events=bool(show_events))
+    else:
+        dff_single = dff[dff["district"] == district]
+        fig = build_district_single_fig(dff_single, district)
+    return fig, build_district_price_table(yr_range)
 
 
 # ── run ───────────────────────────────────────────────────────────────────────

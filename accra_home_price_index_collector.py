@@ -71,6 +71,21 @@ END_YEAR    = 2024
 BASE_YEAR   = 2015        # AHPI normalisation year (index = 100)
 OUTPUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "data", "accra_home_price_index.csv")
+DISTRICT_OUTPUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "data", "accra_district_prices.csv")
+
+# Per-district relative price multipliers.
+# Each entry: (base_mult_2010, annual_drift)
+# Multiplier at year y = base_mult + (y - START_YEAR) * annual_drift.
+# Values are calibrated so the cross-district average ≈ 1.0, consistent with
+# the composite price anchor used by the aggregate AHPI.
+DISTRICT_CONFIGS: dict = {
+    "Spintex Road": (1.28,  +0.008),   # Fast-growing premium corridor; premium widens
+    "Adenta":       (1.15,  +0.001),   # Established mid-premium suburb; stable
+    "Tema":         (0.98,  -0.002),   # Industrial port city; slight relative softening
+    "Dome":         (0.86,  -0.004),   # Dense north suburb; relative affordability rises
+    "Kasoa":        (0.53,  +0.013),   # Peri-urban west; fastest relative catch-up
+}
 
 HEADERS = {
     "User-Agent": (
@@ -606,6 +621,45 @@ def main():
     print(f"{'─'*64}\n")
     print(df[["ds", "y", "exchange_rate_ghs_usd", "inflation_cpi_pct",
               "gold_price_usd", "cocoa_price_usd", "price_ghs_per_sqm"]].tail(12).to_string(index=False))
+    print()
+
+    # ── Per-district price series ──────────────────────────────────────────────
+    print("\n[5/5] Building per-district price series …")
+    years_frac = np.array(
+        [(d.year - START_YEAR) + (d.month - 1) / 12 for d in dates]
+    )
+    district_records = []
+    for district, (base_mult, delta) in DISTRICT_CONFIGS.items():
+        monthly_mult = base_mult + years_frac * delta
+        price_usd_dist = pd.Series(
+            price_usd_monthly_raw.values * monthly_mult, index=dates
+        )
+        price_usd_dist = apply_seasonality(price_usd_dist, PROPERTY_SEASONAL)
+        seed = sum(ord(c) for c in district) % (2 ** 31)
+        price_usd_dist = add_noise(price_usd_dist, sigma_frac=0.010, seed=seed)
+        ahpi_dist, price_ghs_dist = build_ahpi(price_usd_dist, exchange_rate_monthly)
+        for d, av, gv, uv in zip(
+            dates, ahpi_dist.values, price_ghs_dist.values, price_usd_dist.values
+        ):
+            district_records.append({
+                "ds":                d,
+                "district":          district,
+                "y":                 round(float(av), 2),
+                "price_ghs_per_sqm": int(round(float(gv))),
+                "price_usd_per_sqm": int(round(float(uv))),
+            })
+        print(
+            f"  ✓ {district:<15}  2015 mult ≈ {base_mult + 5 * delta:.3f}"
+            f"  |  Dec 2024 AHPI = {ahpi_dist.iloc[-1]:.1f}"
+        )
+
+    df_districts = pd.DataFrame(district_records)
+    df_districts.to_csv(DISTRICT_OUTPUT_PATH, index=False)
+    print(f"\n  Saved → {DISTRICT_OUTPUT_PATH}")
+    print(
+        f"  Rows  : {len(df_districts):,}  "
+        f"({len(DISTRICT_CONFIGS)} districts × {len(dates)} months)"
+    )
     print()
 
     return df
