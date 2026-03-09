@@ -50,8 +50,120 @@ DF = pd.read_csv(DATA_PATH, parse_dates=["ds"])
 DF_DISTRICT = pd.read_csv(DISTRICT_DATA_PATH, parse_dates=["ds"])
 DF_PRIME = pd.read_csv(PRIME_DATA_PATH, parse_dates=["ds"])
 YEARS = list(range(DF["ds"].dt.year.min(), DF["ds"].dt.year.max() + 1))
-DISTRICTS = DF_DISTRICT["district"].unique().tolist()
+
+# ── Prophet forecast outputs ───────────────────────────────────────────────────
+_FORECASTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "forecasts")
+DF_TEST_EVAL = pd.read_csv(
+    os.path.join(_FORECASTS_DIR, "ahpi_test_eval.csv"), parse_dates=["ds"])
+DF_FC_BEAR = pd.read_csv(
+    os.path.join(_FORECASTS_DIR, "ahpi_forecast_bear.csv"), parse_dates=["ds"])
+DF_FC_BASE = pd.read_csv(
+    os.path.join(_FORECASTS_DIR, "ahpi_forecast_base.csv"), parse_dates=["ds"])
+DF_FC_BULL = pd.read_csv(
+    os.path.join(_FORECASTS_DIR, "ahpi_forecast_bull.csv"), parse_dates=["ds"])
+
+# Pre-compute test-set accuracy metrics (used in the static info card)
+_TEST_MAE  = (DF_TEST_EVAL["y"] - DF_TEST_EVAL["yhat"]).abs().mean()
+_TEST_RMSE = ((DF_TEST_EVAL["y"] - DF_TEST_EVAL["yhat"]) ** 2).mean() ** 0.5
+_TEST_MAPE = (
+    (DF_TEST_EVAL["y"] - DF_TEST_EVAL["yhat"]).abs() / DF_TEST_EVAL["y"]
+).mean() * 100
+DISTRICTS   = DF_DISTRICT["district"].unique().tolist()
 PRIME_AREAS = DF_PRIME["district"].unique().tolist()
+
+# ── Prime areas forecast outputs ───────────────────────────────────────────────
+PRIME_AREA_SLUGS: dict[str, str] = {
+    "East Legon":           "east_legon",
+    "Cantonments":          "cantonments",
+    "Airport Residential":  "airport_residential",
+    "Labone / Roman Ridge": "labone_roman_ridge",
+    "Dzorwulu / Abelenkpe": "dzorwulu_abelenkpe",
+    "Trasacco Valley":      "trasacco_valley",
+}
+
+_PRIME_TEST_EVALS: dict[str, pd.DataFrame] = {
+    area: pd.read_csv(
+        os.path.join(_FORECASTS_DIR, f"prime_test_eval_{slug}.csv"),
+        parse_dates=["ds"],
+    )
+    for area, slug in PRIME_AREA_SLUGS.items()
+}
+
+_PRIME_FC: dict[tuple[str, str], pd.DataFrame] = {
+    (sc, area): pd.read_csv(
+        os.path.join(_FORECASTS_DIR, f"prime_forecast_{sc}_{slug}.csv"),
+        parse_dates=["ds"],
+    )
+    for sc in ("bear", "base", "bull")
+    for area, slug in PRIME_AREA_SLUGS.items()
+}
+
+_PRIME_TEST_SUMMARY = pd.read_csv(
+    os.path.join(_FORECASTS_DIR, "prime_test_summary.csv"))
+
+
+def _avg_dfs(dfs: list[pd.DataFrame], val_cols: list[str]) -> pd.DataFrame:
+    """Average val_cols across a list of same-length DataFrames."""
+    base = dfs[0][["ds"]].copy()
+    for col in val_cols:
+        base[col] = sum(df[col].values for df in dfs) / len(dfs)
+    return base
+
+
+_PRIME_TEST_EVAL_AGG = _avg_dfs(
+    list(_PRIME_TEST_EVALS.values()),
+    ["y", "yhat", "yhat_lower", "yhat_upper", "residual"],
+)
+_PRIME_FC_AGG: dict[str, pd.DataFrame] = {
+    sc: _avg_dfs(
+        [_PRIME_FC[(sc, area)] for area in PRIME_AREA_SLUGS],
+        ["yhat", "yhat_lower", "yhat_upper", "trend"],
+    )
+    for sc in ("bear", "base", "bull")
+}
+_PRIME_HIST_AGG = DF_PRIME.groupby("ds")[["y"]].mean().reset_index()
+
+# ── District forecast outputs ──────────────────────────────────────────────────
+DISTRICT_SLUGS: dict[str, str] = {
+    "Spintex Road": "spintex_road",
+    "Adenta":       "adenta",
+    "Tema":         "tema",
+    "Dome":         "dome",
+    "Kasoa":        "kasoa",
+}
+
+_DISTRICT_TEST_EVALS: dict[str, pd.DataFrame] = {
+    d: pd.read_csv(
+        os.path.join(_FORECASTS_DIR, f"district_test_eval_{slug}.csv"),
+        parse_dates=["ds"],
+    )
+    for d, slug in DISTRICT_SLUGS.items()
+}
+
+_DISTRICT_FC: dict[tuple[str, str], pd.DataFrame] = {
+    (sc, d): pd.read_csv(
+        os.path.join(_FORECASTS_DIR, f"district_forecast_{sc}_{slug}.csv"),
+        parse_dates=["ds"],
+    )
+    for sc in ("bear", "base", "bull")
+    for d, slug in DISTRICT_SLUGS.items()
+}
+
+_DISTRICT_TEST_SUMMARY = pd.read_csv(
+    os.path.join(_FORECASTS_DIR, "district_test_summary.csv"))
+
+_DISTRICT_TEST_EVAL_AGG = _avg_dfs(
+    list(_DISTRICT_TEST_EVALS.values()),
+    ["y", "yhat", "yhat_lower", "yhat_upper", "residual"],
+)
+_DISTRICT_FC_AGG: dict[str, pd.DataFrame] = {
+    sc: _avg_dfs(
+        [_DISTRICT_FC[(sc, d)] for d in DISTRICT_SLUGS],
+        ["yhat", "yhat_lower", "yhat_upper", "trend"],
+    )
+    for sc in ("bear", "base", "bull")
+}
+_DISTRICT_HIST_AGG = DF_DISTRICT.groupby("ds")[["y"]].mean().reset_index()
 
 # Prime aggregate: mean of all six areas per month, with macro columns joined
 # so the KPI callback can read exchange_rate / inflation / gold from one place.
@@ -115,6 +227,14 @@ PRIME_COLORS = {
     "Labone / Roman Ridge": "#56d364",   # bright green
     "Dzorwulu / Abelenkpe": "#79c0ff",   # sky blue
     "Trasacco Valley":      "#f0883e",   # amber
+}
+
+DISTRICT_COLORS = {
+    "Spintex Road": "#58a6ff",   # sky blue
+    "Adenta":       "#56d364",   # green
+    "Tema":         "#e3b341",   # gold
+    "Dome":         "#d2a8ff",   # lavender
+    "Kasoa":        "#f0883e",   # amber
 }
 
 # ── geographic coordinates (lat, lon) ─────────────────────────────────────────
@@ -904,6 +1024,511 @@ def build_map_fig(segment: str = "both") -> go.Figure:
     return fig
 
 
+# ── forecast figure ────────────────────────────────────────────────────────────
+SCENARIO_STYLES = {
+    "bear": (C["red"],    "dot",   "Bear  (GHS/USD → 20)"),
+    "base": (C["blue"],   "solid", "Base  (GHS/USD → 15)"),
+    "bull": (C["green"],  "dot",   "Bull  (GHS/USD → 12)"),
+}
+
+
+def build_forecast_fig(show_ci: bool = True) -> go.Figure:
+    """
+    Two-panel figure:
+      row 1 — historical actuals (2010-2024) + test-period predicted vs actual
+               + three scenario forecasts (2025-2026) with 90% CI bands
+      row 2 — test-period residuals (bar chart, 2023-2024)
+    """
+    fig = make_subplots(
+        rows=2, cols=1,
+        row_heights=[0.72, 0.28],
+        shared_xaxes=True,
+        vertical_spacing=0.06,
+        subplot_titles=(
+            "AHPI  ·  Historical Actuals  ·  Test-Period Evaluation  ·  2025–2026 Scenario Forecasts",
+            "Residuals  (Actual − Predicted)  ·  Test Period 2023–2024",
+        ),
+    )
+
+    # ── 1. Historical actuals 2010-2024 (area fill) ───────────────────────────
+    fig.add_trace(go.Scatter(
+        x=DF["ds"], y=DF["y"],
+        fill="tozeroy", fillcolor="rgba(212,160,23,0.10)",
+        line=dict(color=C["gold"], width=2.5),
+        name="Actual AHPI",
+        hovertemplate="%{y:.1f}<extra>Actual</extra>",
+    ), row=1, col=1)
+
+    # ── 2. Test-period prediction + 90% CI ───────────────────────────────────
+    if show_ci:
+        fig.add_trace(go.Scatter(
+            x=list(DF_TEST_EVAL["ds"]) + list(DF_TEST_EVAL["ds"])[::-1],
+            y=list(DF_TEST_EVAL["yhat_upper"]) + list(DF_TEST_EVAL["yhat_lower"])[::-1],
+            fill="toself",
+            fillcolor="rgba(88,166,255,0.15)",
+            line=dict(color="rgba(0,0,0,0)"),
+            name="Test 90% CI",
+            hoverinfo="skip",
+        ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=DF_TEST_EVAL["ds"], y=DF_TEST_EVAL["yhat"],
+        line=dict(color=C["blue"], width=2, dash="dash"),
+        name="Predicted (test 2023–24)",
+        hovertemplate="%{y:.1f}<extra>Predicted</extra>",
+    ), row=1, col=1)
+
+    # ── 3. Scenario forecasts 2025-2026 ──────────────────────────────────────
+    for fc_name, fc_df in [("bear", DF_FC_BEAR), ("base", DF_FC_BASE), ("bull", DF_FC_BULL)]:
+        color, dash, label = SCENARIO_STYLES[fc_name]
+        r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+        if show_ci:
+            fig.add_trace(go.Scatter(
+                x=list(fc_df["ds"]) + list(fc_df["ds"])[::-1],
+                y=list(fc_df["yhat_upper"]) + list(fc_df["yhat_lower"])[::-1],
+                fill="toself",
+                fillcolor=f"rgba({r},{g},{b},0.10)",
+                line=dict(color="rgba(0,0,0,0)"),
+                showlegend=False,
+                hoverinfo="skip",
+            ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=fc_df["ds"], y=fc_df["yhat"],
+            line=dict(color=color, width=2, dash=dash),
+            name=label,
+            customdata=fc_df[["yhat_lower", "yhat_upper"]].values,
+            hovertemplate=(
+                f"<b>{label}</b><br>"
+                "yhat: %{y:.1f}<br>"
+                "90% CI: [%{customdata[0]:.1f} – %{customdata[1]:.1f}]"
+                "<extra></extra>"
+            ),
+        ), row=1, col=1)
+
+    # ── 4. Separator vertical lines ───────────────────────────────────────────
+    for vdate, vlabel in [
+        ("2023-01-01", "Test start"),
+        ("2025-01-01", "Forecast start"),
+    ]:
+        fig.add_vline(
+            x=pd.Timestamp(vdate).timestamp() * 1000,
+            line_dash="dot", line_color=C["muted"], line_width=1.2, opacity=0.55,
+            row=1, col=1,
+        )
+        fig.add_annotation(
+            x=pd.Timestamp(vdate), y=1.0,
+            xref="x", yref="paper",
+            text=vlabel, showarrow=False,
+            font=dict(size=8, color=C["muted"]),
+            bgcolor=C["hover"], bordercolor=C["border"],
+            borderwidth=1, borderpad=3, opacity=0.9, xanchor="left",
+        )
+
+    # ── 5. 2015 baseline ─────────────────────────────────────────────────────
+    fig.add_hline(y=100, line_dash="dot", line_color=C["muted"],
+                  line_width=0.8, opacity=0.4, row=1, col=1)
+
+    # ── 6. Residual bars ──────────────────────────────────────────────────────
+    res_colors = [C["green"] if r >= 0 else C["red"]
+                  for r in DF_TEST_EVAL["residual"]]
+    fig.add_trace(go.Bar(
+        x=DF_TEST_EVAL["ds"],
+        y=DF_TEST_EVAL["residual"],
+        marker_color=res_colors,
+        name="Residual",
+        showlegend=False,
+        hovertemplate="%{y:+.2f}<extra>Residual</extra>",
+    ), row=2, col=1)
+    fig.add_hline(y=0, line_dash="dot", line_color=C["muted"],
+                  line_width=0.8, opacity=0.5, row=2, col=1)
+
+    # ── layout ────────────────────────────────────────────────────────────────
+    fig.update_layout(
+        paper_bgcolor=C["card"],
+        plot_bgcolor=C["bg"],
+        font=dict(family="'Inter', 'Segoe UI', Arial, sans-serif",
+                  color=C["text"], size=11),
+        margin=dict(l=55, r=20, t=50, b=44),
+        hovermode="x unified",
+        hoverlabel=dict(bgcolor=C["hover"], font_color=C["text"],
+                        bordercolor=C["border"], namelength=-1),
+        legend=dict(**BASE_LEGEND, orientation="h", x=0.01, y=1.06),
+        height=640,
+    )
+    fig.update_xaxes(showgrid=False, linecolor=C["border"],
+                     tickcolor=C["muted"], tickfont=dict(size=10))
+    fig.update_yaxes(showgrid=True, gridcolor=C["border"],
+                     linecolor=C["border"], tickfont=dict(size=10))
+    fig.update_yaxes(title_text="Index (2015 = 100)", row=1, col=1)
+    fig.update_yaxes(title_text="Residual (pts)", row=2, col=1)
+    for ann in fig.layout.annotations:
+        ann.font.size  = 10
+        ann.font.color = C["muted"]
+    return fig
+
+
+def build_prime_forecast_fig(area: str = "all", show_ci: bool = True) -> go.Figure:
+    """
+    Two-panel forecast figure for prime areas.
+    area='all'  — aggregate (average) across all 6 prime areas
+    area=<name> — single-area model output
+    """
+    if area == "all":
+        hist_df    = _PRIME_HIST_AGG
+        test_eval  = _PRIME_TEST_EVAL_AGG
+        fc_data    = {sc: _PRIME_FC_AGG[sc] for sc in ("bear", "base", "bull")}
+        main_color = C["red"]
+        fill_color = "rgba(248,81,73,0.10)"
+        hist_name  = "Actual AHPI  (6-area avg)"
+        area_label = "All Prime Areas (average)"
+    else:
+        hist_df    = DF_PRIME[DF_PRIME["district"] == area][["ds", "y"]].reset_index(drop=True)
+        test_eval  = _PRIME_TEST_EVALS[area]
+        fc_data    = {sc: _PRIME_FC[(sc, area)] for sc in ("bear", "base", "bull")}
+        main_color = PRIME_COLORS.get(area, C["red"])
+        r, g, b    = int(main_color[1:3], 16), int(main_color[3:5], 16), int(main_color[5:7], 16)
+        fill_color = f"rgba({r},{g},{b},0.10)"
+        hist_name  = f"Actual AHPI  ({area})"
+        area_label = area
+
+    fig = make_subplots(
+        rows=2, cols=1,
+        row_heights=[0.72, 0.28],
+        shared_xaxes=True,
+        vertical_spacing=0.06,
+        subplot_titles=(
+            f"Prime AHPI  ·  {area_label}  ·  Historical  ·  Test Eval  ·  2025–2026 Scenarios",
+            "Residuals  (Actual − Predicted)  ·  Test Period 2023–2024",
+        ),
+    )
+
+    # 1. Historical actuals 2010-2024
+    fig.add_trace(go.Scatter(
+        x=hist_df["ds"], y=hist_df["y"],
+        fill="tozeroy", fillcolor=fill_color,
+        line=dict(color=main_color, width=2.5),
+        name=hist_name,
+        hovertemplate="%{y:.1f}<extra>Actual</extra>",
+    ), row=1, col=1)
+
+    # 2. Test-period prediction + 90% CI
+    if show_ci:
+        fig.add_trace(go.Scatter(
+            x=list(test_eval["ds"]) + list(test_eval["ds"])[::-1],
+            y=list(test_eval["yhat_upper"]) + list(test_eval["yhat_lower"])[::-1],
+            fill="toself", fillcolor="rgba(88,166,255,0.15)",
+            line=dict(color="rgba(0,0,0,0)"),
+            name="Test 90% CI", hoverinfo="skip",
+        ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=test_eval["ds"], y=test_eval["yhat"],
+        line=dict(color=C["blue"], width=2, dash="dash"),
+        name="Predicted (test 2023–24)",
+        hovertemplate="%{y:.1f}<extra>Predicted</extra>",
+    ), row=1, col=1)
+
+    # 3. Scenario forecasts 2025-2026
+    for fc_name, fc_df in [(sc, fc_data[sc]) for sc in ("bear", "base", "bull")]:
+        color, dash, label = SCENARIO_STYLES[fc_name]
+        r2, g2, b2 = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+        if show_ci:
+            fig.add_trace(go.Scatter(
+                x=list(fc_df["ds"]) + list(fc_df["ds"])[::-1],
+                y=list(fc_df["yhat_upper"]) + list(fc_df["yhat_lower"])[::-1],
+                fill="toself", fillcolor=f"rgba({r2},{g2},{b2},0.10)",
+                line=dict(color="rgba(0,0,0,0)"),
+                showlegend=False, hoverinfo="skip",
+            ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=fc_df["ds"], y=fc_df["yhat"],
+            line=dict(color=color, width=2, dash=dash),
+            name=label,
+            customdata=fc_df[["yhat_lower", "yhat_upper"]].values,
+            hovertemplate=(
+                f"<b>{label}</b><br>"
+                "yhat: %{y:.1f}<br>"
+                "90% CI: [%{customdata[0]:.1f} – %{customdata[1]:.1f}]"
+                "<extra></extra>"
+            ),
+        ), row=1, col=1)
+
+    # 4. Separator vertical lines
+    for vdate, vlabel in [("2023-01-01", "Test start"), ("2025-01-01", "Forecast start")]:
+        fig.add_vline(
+            x=pd.Timestamp(vdate).timestamp() * 1000,
+            line_dash="dot", line_color=C["muted"], line_width=1.2, opacity=0.55,
+            row=1, col=1,
+        )
+        fig.add_annotation(
+            x=pd.Timestamp(vdate), y=1.0,
+            xref="x", yref="paper",
+            text=vlabel, showarrow=False,
+            font=dict(size=8, color=C["muted"]),
+            bgcolor=C["hover"], bordercolor=C["border"],
+            borderwidth=1, borderpad=3, opacity=0.9, xanchor="left",
+        )
+
+    # 5. 2015 baseline
+    fig.add_hline(y=100, line_dash="dot", line_color=C["muted"],
+                  line_width=0.8, opacity=0.4, row=1, col=1)
+
+    # 6. Residual bars
+    res_colors = [C["green"] if r >= 0 else C["red"] for r in test_eval["residual"]]
+    fig.add_trace(go.Bar(
+        x=test_eval["ds"], y=test_eval["residual"],
+        marker_color=res_colors, name="Residual",
+        showlegend=False, hovertemplate="%{y:+.2f}<extra>Residual</extra>",
+    ), row=2, col=1)
+    fig.add_hline(y=0, line_dash="dot", line_color=C["muted"],
+                  line_width=0.8, opacity=0.5, row=2, col=1)
+
+    fig.update_layout(
+        paper_bgcolor=C["card"], plot_bgcolor=C["bg"],
+        font=dict(family="'Inter', 'Segoe UI', Arial, sans-serif",
+                  color=C["text"], size=11),
+        margin=dict(l=55, r=20, t=50, b=44),
+        hovermode="x unified",
+        hoverlabel=dict(bgcolor=C["hover"], font_color=C["text"],
+                        bordercolor=C["border"], namelength=-1),
+        legend=dict(**BASE_LEGEND, orientation="h", x=0.01, y=1.06),
+        height=640,
+    )
+    fig.update_xaxes(showgrid=False, linecolor=C["border"],
+                     tickcolor=C["muted"], tickfont=dict(size=10))
+    fig.update_yaxes(showgrid=True, gridcolor=C["border"],
+                     linecolor=C["border"], tickfont=dict(size=10))
+    fig.update_yaxes(title_text="Index (2015 = 100)", row=1, col=1)
+    fig.update_yaxes(title_text="Residual (pts)", row=2, col=1)
+    for ann in fig.layout.annotations:
+        ann.font.size  = 10
+        ann.font.color = C["muted"]
+    return fig
+
+
+def _build_prime_metrics_div(area: str) -> html.Div:
+    if area == "all":
+        mae  = _PRIME_TEST_SUMMARY["mae"].mean()
+        rmse = _PRIME_TEST_SUMMARY["rmse"].mean()
+        mape = _PRIME_TEST_SUMMARY["mape_pct"].mean()
+        note = "Average across all 6 prime areas (n = 24 per area)."
+    else:
+        row  = _PRIME_TEST_SUMMARY[_PRIME_TEST_SUMMARY["area"] == area].iloc[0]
+        mae, rmse, mape = row["mae"], row["rmse"], row["mape_pct"]
+        note = f"Evaluation model for {area}; trained 2010–2022 (n = 24 test months)."
+    return html.Div([
+        _stat_row("MAE",  f"{mae:.2f} index pts",  C["gold"]),
+        _stat_row("RMSE", f"{rmse:.2f} index pts", C["orange"]),
+        _stat_row("MAPE", f"{mape:.1f}%",          C["red"]),
+        html.Hr(style={"borderColor": C["border"], "margin": "8px 0"}),
+        html.Div(note, style={"fontSize": "0.75rem", "color": C["muted"]}),
+    ])
+
+
+def _build_prime_targets_div(area: str) -> html.Div:
+    rows = []
+    for sc in ("bear", "base", "bull"):
+        color, _, label = SCENARIO_STYLES[sc]
+        fc_df = _PRIME_FC_AGG[sc] if area == "all" else _PRIME_FC[(sc, area)]
+        dec26 = fc_df.iloc[-1]
+        rows.append(html.Div([
+            html.Span("● ", style={"color": color, "fontSize": "1rem"}),
+            html.Span(f"{label}: ", style={"color": C["muted"], "fontSize": "0.8rem"}),
+            html.Span(f"{dec26['yhat']:.1f}",
+                      style={"color": color, "fontWeight": "700", "fontSize": "0.9rem"}),
+            html.Span(f"  [{dec26['yhat_lower']:.1f} – {dec26['yhat_upper']:.1f}]",
+                      style={"color": C["muted"], "fontSize": "0.78rem"}),
+        ], className="mb-2"))
+    return html.Div([
+        *rows,
+        html.Hr(style={"borderColor": C["border"], "margin": "8px 0"}),
+        html.Div(
+            "Dec 2026 AHPI targets under each scenario. 90% credible interval in brackets.",
+            style={"fontSize": "0.75rem", "color": C["muted"]},
+        ),
+    ])
+
+
+def build_district_forecast_fig(district: str = "all", show_ci: bool = True) -> go.Figure:
+    """
+    Two-panel forecast figure for mid-market districts.
+    district='all'  — aggregate (average) across all 5 districts
+    district=<name> — single-district model output
+    """
+    if district == "all":
+        hist_df      = _DISTRICT_HIST_AGG
+        test_eval    = _DISTRICT_TEST_EVAL_AGG
+        fc_data      = {sc: _DISTRICT_FC_AGG[sc] for sc in ("bear", "base", "bull")}
+        main_color   = C["blue"]
+        fill_color   = "rgba(88,166,255,0.10)"
+        hist_name    = "Actual AHPI  (5-district avg)"
+        area_label   = "All Districts (average)"
+    else:
+        hist_df    = DF_DISTRICT[DF_DISTRICT["district"] == district][["ds", "y"]].reset_index(drop=True)
+        test_eval  = _DISTRICT_TEST_EVALS[district]
+        fc_data    = {sc: _DISTRICT_FC[(sc, district)] for sc in ("bear", "base", "bull")}
+        main_color = DISTRICT_COLORS.get(district, C["blue"])
+        r, g, b    = int(main_color[1:3], 16), int(main_color[3:5], 16), int(main_color[5:7], 16)
+        fill_color = f"rgba({r},{g},{b},0.10)"
+        hist_name  = f"Actual AHPI  ({district})"
+        area_label = district
+
+    fig = make_subplots(
+        rows=2, cols=1,
+        row_heights=[0.72, 0.28],
+        shared_xaxes=True,
+        vertical_spacing=0.06,
+        subplot_titles=(
+            f"District AHPI  ·  {area_label}  ·  Historical  ·  Test Eval  ·  2025–2026 Scenarios",
+            "Residuals  (Actual − Predicted)  ·  Test Period 2023–2024",
+        ),
+    )
+
+    # 1. Historical actuals
+    fig.add_trace(go.Scatter(
+        x=hist_df["ds"], y=hist_df["y"],
+        fill="tozeroy", fillcolor=fill_color,
+        line=dict(color=main_color, width=2.5),
+        name=hist_name,
+        hovertemplate="%{y:.1f}<extra>Actual</extra>",
+    ), row=1, col=1)
+
+    # 2. Test-period prediction + 90% CI
+    if show_ci:
+        fig.add_trace(go.Scatter(
+            x=list(test_eval["ds"]) + list(test_eval["ds"])[::-1],
+            y=list(test_eval["yhat_upper"]) + list(test_eval["yhat_lower"])[::-1],
+            fill="toself", fillcolor="rgba(88,166,255,0.15)",
+            line=dict(color="rgba(0,0,0,0)"),
+            name="Test 90% CI", hoverinfo="skip",
+        ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=test_eval["ds"], y=test_eval["yhat"],
+        line=dict(color=C["blue"], width=2, dash="dash"),
+        name="Predicted (test 2023–24)",
+        hovertemplate="%{y:.1f}<extra>Predicted</extra>",
+    ), row=1, col=1)
+
+    # 3. Scenario forecasts 2025-2026
+    for fc_name, fc_df in [(sc, fc_data[sc]) for sc in ("bear", "base", "bull")]:
+        color, dash, label = SCENARIO_STYLES[fc_name]
+        r2, g2, b2 = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+        if show_ci:
+            fig.add_trace(go.Scatter(
+                x=list(fc_df["ds"]) + list(fc_df["ds"])[::-1],
+                y=list(fc_df["yhat_upper"]) + list(fc_df["yhat_lower"])[::-1],
+                fill="toself", fillcolor=f"rgba({r2},{g2},{b2},0.10)",
+                line=dict(color="rgba(0,0,0,0)"),
+                showlegend=False, hoverinfo="skip",
+            ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=fc_df["ds"], y=fc_df["yhat"],
+            line=dict(color=color, width=2, dash=dash),
+            name=label,
+            customdata=fc_df[["yhat_lower", "yhat_upper"]].values,
+            hovertemplate=(
+                f"<b>{label}</b><br>"
+                "yhat: %{y:.1f}<br>"
+                "90% CI: [%{customdata[0]:.1f} – %{customdata[1]:.1f}]"
+                "<extra></extra>"
+            ),
+        ), row=1, col=1)
+
+    # 4. Vertical separators
+    for vdate, vlabel in [("2023-01-01", "Test start"), ("2025-01-01", "Forecast start")]:
+        fig.add_vline(
+            x=pd.Timestamp(vdate).timestamp() * 1000,
+            line_dash="dot", line_color=C["muted"], line_width=1.2, opacity=0.55,
+            row=1, col=1,
+        )
+        fig.add_annotation(
+            x=pd.Timestamp(vdate), y=1.0,
+            xref="x", yref="paper",
+            text=vlabel, showarrow=False,
+            font=dict(size=8, color=C["muted"]),
+            bgcolor=C["hover"], bordercolor=C["border"],
+            borderwidth=1, borderpad=3, opacity=0.9, xanchor="left",
+        )
+
+    # 5. Baseline
+    fig.add_hline(y=100, line_dash="dot", line_color=C["muted"],
+                  line_width=0.8, opacity=0.4, row=1, col=1)
+
+    # 6. Residual bars
+    res_colors = [C["green"] if r >= 0 else C["red"] for r in test_eval["residual"]]
+    fig.add_trace(go.Bar(
+        x=test_eval["ds"], y=test_eval["residual"],
+        marker_color=res_colors, name="Residual",
+        showlegend=False, hovertemplate="%{y:+.2f}<extra>Residual</extra>",
+    ), row=2, col=1)
+    fig.add_hline(y=0, line_dash="dot", line_color=C["muted"],
+                  line_width=0.8, opacity=0.5, row=2, col=1)
+
+    fig.update_layout(
+        paper_bgcolor=C["card"], plot_bgcolor=C["bg"],
+        font=dict(family="'Inter', 'Segoe UI', Arial, sans-serif",
+                  color=C["text"], size=11),
+        margin=dict(l=55, r=20, t=50, b=44),
+        hovermode="x unified",
+        hoverlabel=dict(bgcolor=C["hover"], font_color=C["text"],
+                        bordercolor=C["border"], namelength=-1),
+        legend=dict(**BASE_LEGEND, orientation="h", x=0.01, y=1.06),
+        height=640,
+    )
+    fig.update_xaxes(showgrid=False, linecolor=C["border"],
+                     tickcolor=C["muted"], tickfont=dict(size=10))
+    fig.update_yaxes(showgrid=True, gridcolor=C["border"],
+                     linecolor=C["border"], tickfont=dict(size=10))
+    fig.update_yaxes(title_text="Index (2015 = 100)", row=1, col=1)
+    fig.update_yaxes(title_text="Residual (pts)", row=2, col=1)
+    for ann in fig.layout.annotations:
+        ann.font.size  = 10
+        ann.font.color = C["muted"]
+    return fig
+
+
+def _build_district_metrics_div(district: str) -> html.Div:
+    if district == "all":
+        mae  = _DISTRICT_TEST_SUMMARY["mae"].mean()
+        rmse = _DISTRICT_TEST_SUMMARY["rmse"].mean()
+        mape = _DISTRICT_TEST_SUMMARY["mape_pct"].mean()
+        note = "Average across all 5 mid-market districts (n = 24 per district)."
+    else:
+        row  = _DISTRICT_TEST_SUMMARY[_DISTRICT_TEST_SUMMARY["district"] == district].iloc[0]
+        mae, rmse, mape = row["mae"], row["rmse"], row["mape_pct"]
+        note = f"Evaluation model for {district}; trained 2010–2022 (n = 24 test months)."
+    return html.Div([
+        _stat_row("MAE",  f"{mae:.2f} index pts",  C["gold"]),
+        _stat_row("RMSE", f"{rmse:.2f} index pts", C["orange"]),
+        _stat_row("MAPE", f"{mape:.1f}%",          C["red"]),
+        html.Hr(style={"borderColor": C["border"], "margin": "8px 0"}),
+        html.Div(note, style={"fontSize": "0.75rem", "color": C["muted"]}),
+    ])
+
+
+def _build_district_targets_div(district: str) -> html.Div:
+    rows = []
+    for sc in ("bear", "base", "bull"):
+        color, _, label = SCENARIO_STYLES[sc]
+        fc_df = _DISTRICT_FC_AGG[sc] if district == "all" else _DISTRICT_FC[(sc, district)]
+        dec26 = fc_df.iloc[-1]
+        rows.append(html.Div([
+            html.Span("● ", style={"color": color, "fontSize": "1rem"}),
+            html.Span(f"{label}: ", style={"color": C["muted"], "fontSize": "0.8rem"}),
+            html.Span(f"{dec26['yhat']:.1f}",
+                      style={"color": color, "fontWeight": "700", "fontSize": "0.9rem"}),
+            html.Span(f"  [{dec26['yhat_lower']:.1f} – {dec26['yhat_upper']:.1f}]",
+                      style={"color": C["muted"], "fontSize": "0.78rem"}),
+        ], className="mb-2"))
+    return html.Div([
+        *rows,
+        html.Hr(style={"borderColor": C["border"], "margin": "8px 0"}),
+        html.Div(
+            "Dec 2026 AHPI targets under each scenario. 90% credible interval in brackets.",
+            style={"fontSize": "0.75rem", "color": C["muted"]},
+        ),
+    ])
+
+
 # ── reusable layout pieces ────────────────────────────────────────────────────
 def kpi_card(label, val_id, icon, color=C["gold"]):
     return dbc.Col(
@@ -1247,6 +1872,220 @@ tab_map = html.Div([
     ),
 ])
 
+# ── tab: Forecast ──────────────────────────────────────────────────────────────
+def _stat_row(label, value, color=C["gold"]):
+    return html.Div([
+        html.Span(f"{label}: ", style={"color": C["muted"], "fontSize": "0.8rem"}),
+        html.Span(value, style={"color": color, "fontWeight": "700", "fontSize": "0.9rem"}),
+    ], className="mb-1")
+
+
+_forecast_metrics_div = html.Div([
+    _stat_row("MAE",  f"{_TEST_MAE:.2f} index pts",  C["gold"]),
+    _stat_row("RMSE", f"{_TEST_RMSE:.2f} index pts", C["orange"]),
+    _stat_row("MAPE", f"{_TEST_MAPE:.1f}%",          C["red"]),
+    html.Hr(style={"borderColor": C["border"], "margin": "8px 0"}),
+    html.Div(
+        "Evaluation model trained 2010–2022 only, tested on 2023–2024 (n = 24 months).",
+        style={"fontSize": "0.75rem", "color": C["muted"]},
+    ),
+])
+
+_dec26 = {
+    "bear": DF_FC_BEAR.iloc[-1],
+    "base": DF_FC_BASE.iloc[-1],
+    "bull": DF_FC_BULL.iloc[-1],
+}
+
+_scenario_targets_div = html.Div([
+    *[
+        html.Div([
+            html.Span("● ", style={"color": SCENARIO_STYLES[n][0], "fontSize": "1rem"}),
+            html.Span(f"{SCENARIO_STYLES[n][2]}: ",
+                      style={"color": C["muted"], "fontSize": "0.8rem"}),
+            html.Span(f"{_dec26[n]['yhat']:.1f}",
+                      style={"color": SCENARIO_STYLES[n][0],
+                             "fontWeight": "700", "fontSize": "0.9rem"}),
+            html.Span(f"  [{_dec26[n]['yhat_lower']:.1f} – {_dec26[n]['yhat_upper']:.1f}]",
+                      style={"color": C["muted"], "fontSize": "0.78rem"}),
+        ], className="mb-2")
+        for n in ["bear", "base", "bull"]
+    ],
+    html.Hr(style={"borderColor": C["border"], "margin": "8px 0"}),
+    html.Div(
+        "Dec 2026 AHPI targets under each scenario. 90% credible interval in brackets.",
+        style={"fontSize": "0.75rem", "color": C["muted"]},
+    ),
+])
+
+tab_forecast = html.Div([
+    section_card(
+        dbc.Row([
+            dbc.Col([
+                html.Label("90% Confidence Intervals",
+                           style={"fontSize": "0.78rem", "color": C["muted"]}),
+                dbc.Switch(id="forecast-ci", value=True, label=""),
+            ], md=3, className="d-flex flex-column justify-content-start"),
+            dbc.Col([
+                html.Div(
+                    "Prophet mid-market model trained on 180 months (Jan 2010 – Dec 2024) "
+                    "with 6 macro regressors. "
+                    "Test accuracy uses an evaluation model trained on 2010–2022 only.",
+                    style={"fontSize": "0.75rem", "color": C["muted"], "paddingTop": "8px"},
+                ),
+            ], md=9),
+        ], className="mb-2"),
+        dcc.Graph(
+            id="forecast-chart",
+            config={
+                "displayModeBar": True,
+                "modeBarButtonsToRemove": ["lasso2d"],
+                "toImageButtonOptions": {"scale": 2},
+            },
+        ),
+    ),
+    dbc.Row([
+        dbc.Col(
+            section_card(
+                html.P("Test-set accuracy  (2023–2024  ·  n = 24)",
+                       style={"color": C["muted"], "fontSize": "0.78rem",
+                              "fontWeight": "600", "marginBottom": "10px"}),
+                _forecast_metrics_div,
+            ), md=4,
+        ),
+        dbc.Col(
+            section_card(
+                html.P("Dec 2026 AHPI targets by scenario",
+                       style={"color": C["muted"], "fontSize": "0.78rem",
+                              "fontWeight": "600", "marginBottom": "10px"}),
+                _scenario_targets_div,
+            ), md=8,
+        ),
+    ]),
+])
+
+# ── tab: Prime Forecast ────────────────────────────────────────────────────────
+tab_prime_forecast = html.Div([
+    section_card(
+        dbc.Row([
+            dbc.Col([
+                html.Label("Prime area", style={"fontSize": "0.78rem", "color": C["muted"]}),
+                dcc.Dropdown(
+                    id="prime-fc-area",
+                    options=(
+                        [{"label": "All Areas (average)", "value": "all"}] +
+                        [{"label": a, "value": a} for a in PRIME_AREAS]
+                    ),
+                    value="all",
+                    clearable=False,
+                    style={"backgroundColor": C["bg"], "color": C["text"],
+                           "fontSize": "0.82rem"},
+                ),
+            ], md=5),
+            dbc.Col([
+                html.Label("90% Confidence Intervals",
+                           style={"fontSize": "0.78rem", "color": C["muted"]}),
+                dbc.Switch(id="prime-fc-ci", value=True, label=""),
+            ], md=3, className="d-flex flex-column justify-content-start"),
+            dbc.Col([
+                html.Div(
+                    "One Prophet model per prime area (6 models). "
+                    "USD-indexed markets: exchange rate is the dominant regressor. "
+                    "Bear/Base/Bull assume GHS/USD → 20 / 15 / 12 by end-2026.",
+                    style={"fontSize": "0.75rem", "color": C["muted"], "paddingTop": "8px"},
+                ),
+            ], md=4),
+        ], className="mb-2"),
+        dcc.Graph(
+            id="prime-forecast-chart",
+            config={
+                "displayModeBar": True,
+                "modeBarButtonsToRemove": ["lasso2d"],
+                "toImageButtonOptions": {"scale": 2},
+            },
+        ),
+    ),
+    dbc.Row([
+        dbc.Col(
+            section_card(
+                html.P("Test-set accuracy  (2023–2024  ·  n = 24)",
+                       style={"color": C["muted"], "fontSize": "0.78rem",
+                              "fontWeight": "600", "marginBottom": "10px"}),
+                html.Div(id="prime-fc-metrics"),
+            ), md=4,
+        ),
+        dbc.Col(
+            section_card(
+                html.P("Dec 2026 AHPI targets by scenario",
+                       style={"color": C["muted"], "fontSize": "0.78rem",
+                              "fontWeight": "600", "marginBottom": "10px"}),
+                html.Div(id="prime-fc-targets"),
+            ), md=8,
+        ),
+    ]),
+])
+
+# ── tab: District Forecast ─────────────────────────────────────────────────────
+tab_district_forecast = html.Div([
+    section_card(
+        dbc.Row([
+            dbc.Col([
+                html.Label("District", style={"fontSize": "0.78rem", "color": C["muted"]}),
+                dcc.Dropdown(
+                    id="district-fc-area",
+                    options=(
+                        [{"label": "All Districts (average)", "value": "all"}] +
+                        [{"label": d, "value": d} for d in DISTRICTS]
+                    ),
+                    value="all",
+                    clearable=False,
+                    style={"backgroundColor": C["bg"], "color": C["text"],
+                           "fontSize": "0.82rem"},
+                ),
+            ], md=5),
+            dbc.Col([
+                html.Label("90% Confidence Intervals",
+                           style={"fontSize": "0.78rem", "color": C["muted"]}),
+                dbc.Switch(id="district-fc-ci", value=True, label=""),
+            ], md=3, className="d-flex flex-column justify-content-start"),
+            dbc.Col([
+                html.Div(
+                    "One Prophet model per mid-market district (5 models). "
+                    "GHS-denominated markets; exchange rate and CPI are the primary regressors. "
+                    "Bear/Base/Bull assume GHS/USD → 20 / 15 / 12 by end-2026.",
+                    style={"fontSize": "0.75rem", "color": C["muted"], "paddingTop": "8px"},
+                ),
+            ], md=4),
+        ], className="mb-2"),
+        dcc.Graph(
+            id="district-forecast-chart",
+            config={
+                "displayModeBar": True,
+                "modeBarButtonsToRemove": ["lasso2d"],
+                "toImageButtonOptions": {"scale": 2},
+            },
+        ),
+    ),
+    dbc.Row([
+        dbc.Col(
+            section_card(
+                html.P("Test-set accuracy  (2023–2024  ·  n = 24)",
+                       style={"color": C["muted"], "fontSize": "0.78rem",
+                              "fontWeight": "600", "marginBottom": "10px"}),
+                html.Div(id="district-fc-metrics"),
+            ), md=4,
+        ),
+        dbc.Col(
+            section_card(
+                html.P("Dec 2026 AHPI targets by scenario",
+                       style={"color": C["muted"], "fontSize": "0.78rem",
+                              "fontWeight": "600", "marginBottom": "10px"}),
+                html.Div(id="district-fc-targets"),
+            ), md=8,
+        ),
+    ]),
+])
+
 # ── app layout ────────────────────────────────────────────────────────────────
 app = dash.Dash(
     __name__,
@@ -1329,6 +2168,15 @@ app.layout = html.Div(
                         label_style={"color": C["muted"], "fontSize": "0.85rem"},
                         active_label_style={"color": C["gold"], "fontWeight": "600"}),
                 dbc.Tab(tab_map,        label="Map",                 tab_id="tab-map",
+                        label_style={"color": C["muted"], "fontSize": "0.85rem"},
+                        active_label_style={"color": C["gold"], "fontWeight": "600"}),
+                dbc.Tab(tab_forecast,       label="Forecast",            tab_id="tab-forecast",
+                        label_style={"color": C["muted"], "fontSize": "0.85rem"},
+                        active_label_style={"color": C["gold"], "fontWeight": "600"}),
+                dbc.Tab(tab_prime_forecast,    label="Prime Forecast",    tab_id="tab-prime-forecast",
+                        label_style={"color": C["muted"], "fontSize": "0.85rem"},
+                        active_label_style={"color": C["gold"], "fontWeight": "600"}),
+                dbc.Tab(tab_district_forecast, label="District Forecast", tab_id="tab-district-forecast",
                         label_style={"color": C["muted"], "fontSize": "0.85rem"},
                         active_label_style={"color": C["gold"], "fontWeight": "600"}),
             ], id="main-tabs", active_tab="tab-overview",
@@ -1554,6 +2402,49 @@ def update_prime(yr_range, area, show_events):
 )
 def update_map(segment):
     return build_map_fig(segment or "both")
+
+
+@app.callback(
+    Output("forecast-chart", "figure"),
+    Input("forecast-ci", "value"),
+    prevent_initial_call=False,
+)
+def update_forecast(show_ci):
+    return build_forecast_fig(show_ci=bool(show_ci))
+
+
+@app.callback(
+    Output("prime-forecast-chart", "figure"),
+    Output("prime-fc-metrics",     "children"),
+    Output("prime-fc-targets",     "children"),
+    Input("prime-fc-ci",   "value"),
+    Input("prime-fc-area", "value"),
+    prevent_initial_call=False,
+)
+def update_prime_forecast(show_ci, area):
+    area = area or "all"
+    return (
+        build_prime_forecast_fig(area, show_ci=bool(show_ci)),
+        _build_prime_metrics_div(area),
+        _build_prime_targets_div(area),
+    )
+
+
+@app.callback(
+    Output("district-forecast-chart", "figure"),
+    Output("district-fc-metrics",     "children"),
+    Output("district-fc-targets",     "children"),
+    Input("district-fc-ci",   "value"),
+    Input("district-fc-area", "value"),
+    prevent_initial_call=False,
+)
+def update_district_forecast(show_ci, district):
+    district = district or "all"
+    return (
+        build_district_forecast_fig(district, show_ci=bool(show_ci)),
+        _build_district_metrics_div(district),
+        _build_district_targets_div(district),
+    )
 
 
 # ── run ───────────────────────────────────────────────────────────────────────

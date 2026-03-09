@@ -16,7 +16,7 @@
 9. [Regressor Correlations](#9-regressor-correlations)
 10. [Stakeholders & Implications](#10-stakeholders--implications)
 11. [Limitations & Caveats](#11-limitations--caveats)
-12. [Using AHPI with Facebook Prophet](#12-using-ahpi-with-facebook-prophet)
+12. [Prophet Forecasting: Implementation & Results](#12-prophet-forecasting-implementation--results)
 13. [Data Sources](#13-data-sources)
 
 ---
@@ -538,110 +538,192 @@ The prime AHPI grew +3,264% over the same period — more than double the mid-ma
 
 ---
 
-## 12. Using AHPI with Facebook Prophet
+## 12. Prophet Forecasting: Implementation & Results
 
-### 12.1 Aggregate Mid-Market (with regressors)
+Three production-ready Prophet training scripts have been built and trained on the AHPI datasets. All models share the same six-regressor macro set, `changepoint_prior_scale=0.5`, `seasonality_mode="multiplicative"`, and manual changepoints at the 2014 cedi crisis and 2022 debt crisis. Regressors are standardised with a `StandardScaler` fitted on training data only (2010–2022) to prevent leakage. Separate production models are then re-fitted on the full 2010–2024 dataset for forecasting.
+
+### 12.1 Training Scripts
+
+| Script | Models trained | Output models | Output forecasts |
+|--------|:-------------:|:-------------:|:----------------:|
+| `ahpi_prophet.py` | 1 (composite mid-market) | `models/ahpi_prophet_model.json` + `ahpi_scaler.pkl` | Bear / Base / Bull CSVs |
+| `ahpi_prime_prophet.py` | 6 (one per prime area) | `models/prime_prophet_{slug}.json` + `prime_scaler.pkl` | 18 scenario CSVs + summary |
+| `ahpi_district_prophet.py` | 5 (one per mid-market district) | `models/district_prophet_{slug}.json` + `district_scaler.pkl` | 15 scenario CSVs + summary |
+
+Run any script directly:
+
+```bash
+python ahpi_prophet.py
+python ahpi_prime_prophet.py
+python ahpi_district_prophet.py
+```
+
+### 12.2 Model Configuration
+
+All three scripts use the same core setup:
 
 ```python
 from prophet import Prophet
-import pandas as pd
+from sklearn.preprocessing import StandardScaler
 
-df = pd.read_csv("data/accra_home_price_index.csv", parse_dates=["ds"])
+REGRESSORS = [
+    "exchange_rate_ghs_usd",   # rho = +0.991 — primary driver
+    "cpi_index",               # rho = +0.986 — accumulated inflation
+    "urban_pop_pct",           # rho = +0.871 — structural demand
+    "broad_money_pct_gdp",     # rho = +0.813 — monetary conditions
+    "gold_price_usd",          # rho = +0.786 — fiscal / remittance proxy
+    "cocoa_price_usd",         # rho = +0.764 — export revenue proxy
+]
 
-# Recommended: add changepoints at structural break dates
 m = Prophet(
     changepoints=["2014-01-01", "2022-01-01"],
     changepoint_prior_scale=0.5,
     seasonality_mode="multiplicative",
     yearly_seasonality=True,
+    weekly_seasonality=False,
+    daily_seasonality=False,
+    interval_width=0.90,
 )
-
-# Primary regressors (highest correlation with y)
-for reg in ["exchange_rate_ghs_usd", "cpi_index", "gold_price_usd",
-            "cocoa_price_usd", "urban_pop_pct", "broad_money_pct_gdp"]:
+for reg in REGRESSORS:
     m.add_regressor(reg)
 
-m.fit(df)
-
-# Future dataframe requires future regressor values (scenario-based)
-future = m.make_future_dataframe(periods=24, freq="MS")
-# ... populate future regressors with economic scenarios ...
-forecast = m.predict(future)
-```
-
-### 12.2 Recommended preprocessing
-
-```python
-from sklearn.preprocessing import StandardScaler
-
-regressors = [c for c in df.columns if c not in ("ds", "y")]
+# Fit scaler on training data only — prevents leakage into 2023-2024 test period
 scaler = StandardScaler()
-df[regressors] = scaler.fit_transform(df[regressors])
+scaler.fit(df_train[REGRESSORS])
+df_scaled = df.copy()
+df_scaled[REGRESSORS] = scaler.transform(df[REGRESSORS])
+
+m.fit(df_scaled[df_scaled["ds"] <= "2022-12-01"][["ds", "y"] + REGRESSORS])
 ```
 
-### 12.3 Suggested scenario regressors for 2025–2026 forecasting
+### 12.3 Scenario Assumptions (2025–2026 Forecasts)
 
-| Scenario | `exchange_rate_ghs_usd` | `inflation_cpi_pct` | `gold_price_usd` |
-|----------|------------------------|--------------------|--------------------|
-| **Bear** (continued depreciation) | 18–22 | 28–35% | 1,800–2,000 |
-| **Base** (gradual stabilisation) | 14–16 | 18–22% | 2,100–2,400 |
-| **Bull** (cedi recovery on cocoa windfall) | 11–13 | 12–16% | 2,300–2,600 |
+Three forward scenarios are applied to all 12 models (composite, 6 prime, 5 district):
 
-### 12.4 Per-District Forecasting
+| Scenario | `exchange_rate_ghs_usd` | `inflation_cpi_pct` | `gold_price_usd` | `cocoa_price_usd` |
+|----------|:-----------------------:|:-------------------:|:----------------:|:-----------------:|
+| **Bear** — continued cedi depreciation | 20.0 | 31% | 1,900 | 4,000 |
+| **Base** — gradual stabilisation | 15.0 | 20% | 2,250 | 5,500 |
+| **Bull** — cedi recovery on cocoa windfall | 12.0 | 14% | 2,500 | 6,500 |
 
-```python
-from prophet import Prophet
-import pandas as pd
+`cpi_index` is compounded monthly from the last observed value using the scenario's `inflation_cpi_pct`. `urban_pop_pct` and `broad_money_pct_gdp` are forward-extrapolated via OLS from the trailing 36-month trend.
 
-df = pd.read_csv("data/accra_district_prices.csv", parse_dates=["ds"])
+### 12.4 Test-Set Accuracy (2023–2024 · 24 months held out)
 
-# Forecast one district at a time
-for district in df["district"].unique():
-    sub = df[df["district"] == district][["ds", "y"]].copy()
+#### Composite Mid-Market
 
-    m = Prophet(
-        changepoints=["2014-01-01", "2022-01-01"],
-        changepoint_prior_scale=0.5,
-        seasonality_mode="multiplicative",
-    )
-    m.fit(sub)
+| Metric | Value |
+|--------|-------|
+| MAE | **28.49** index pts |
+| RMSE | **32.73** index pts |
+| MAPE | **7.8%** |
 
-    future = m.make_future_dataframe(periods=24, freq="MS")
-    forecast = m.predict(future)
-    print(f"{district}: 2-year forecast end = {forecast['yhat'].iloc[-1]:.1f}")
+#### Prime Areas (per-area models)
+
+| Area | MAE | RMSE | MAPE |
+|------|:---:|:----:|:----:|
+| East Legon | 15.33 | 22.55 | 1.9% |
+| Cantonments | 25.02 | 32.32 | 3.8% |
+| Airport Residential | 8.00 | 9.62 | 1.2% |
+| Labone / Roman Ridge | 8.75 | 11.14 | 1.2% |
+| Dzorwulu / Abelenkpe | 7.87 | 9.63 | 1.1% |
+| Trasacco Valley | 46.87 | 58.86 | 7.6% |
+| **Average** | **18.64** | **24.02** | **2.8%** |
+
+> Trasacco Valley's higher error reflects its ultra-thin transaction market and the greater noisiness of its price anchors. All other prime areas achieve MAPE ≤ 4%.
+
+#### Mid-Market Districts (per-district models)
+
+| District | MAE | RMSE | MAPE |
+|----------|:---:|:----:|:----:|
+| Spintex Road | 47.93 | 55.44 | 12.3% |
+| Adenta | 34.80 | 39.23 | 9.6% |
+| Tema | 30.76 | 35.58 | 8.5% |
+| Dome | 32.77 | 37.33 | 9.3% |
+| Kasoa | 39.48 | 45.28 | 9.1% |
+| **Average** | **37.15** | **42.57** | **9.8%** |
+
+> District MAPEs are higher than the composite (9.8% vs 7.8%) because individual districts carry more idiosyncratic noise that partially cancels in the aggregate.
+
+### 12.5 Dec 2026 Scenario Forecasts
+
+#### Composite Mid-Market AHPI
+
+| Scenario | Dec 2026 AHPI | 90% CI |
+|----------|:-------------:|:------:|
+| Bear | 663.6 | [634.6 – 692.7] |
+| Base | 550.6 | [530.5 – 571.7] |
+| Bull | 489.8 | [469.0 – 501.4] |
+
+#### Prime Areas — Base Scenario Dec 2026
+
+| Area | Dec 2026 AHPI |
+|------|:-------------:|
+| Airport Residential | 953.8 |
+| East Legon | 938.2 |
+| Dzorwulu / Abelenkpe | 925.0 |
+| Labone / Roman Ridge | 814.4 |
+| Trasacco Valley | 754.1 |
+| Cantonments | 737.8 |
+
+#### Mid-Market Districts — Base Scenario Dec 2026
+
+| District | Dec 2026 AHPI |
+|----------|:-------------:|
+| Kasoa | 657.2 |
+| Spintex Road | 568.9 |
+| Adenta | 550.1 |
+| Dome | 539.0 |
+| Tema | 515.4 |
+
+### 12.6 Interactive Dashboard (`accra_dashboard.py`)
+
+A full-featured Dash dashboard visualises all three datasets and all three Prophet model families across **10 tabs**:
+
+| Tab | Content |
+|-----|---------|
+| **Overview** | AHPI composite KPIs, trend chart, YoY change |
+| **Districts** | Per-district AHPI lines, spread chart, price tables |
+| **Prime Areas** | Per-area AHPI lines, USD comparison, heatmap |
+| **Macro** | All 20 regressors with correlation rankings |
+| **Correlation** | Regressor–AHPI Pearson heatmap and scatter |
+| **Seasonality** | Monthly seasonal factors for all markets |
+| **Map** | Mapbox bubble map of Accra districts and prime areas |
+| **Forecast** | Mid-market Prophet: historical + test eval + Bear/Base/Bull scenarios + residuals |
+| **Prime Forecast** | Per-area Prophet: area selector, CI toggle, 2-panel figure, accuracy card, Dec 2026 targets |
+| **District Forecast** | Per-district Prophet: district selector, CI toggle, 2-panel figure, accuracy card, Dec 2026 targets |
+
+Launch with:
+
+```bash
+python accra_dashboard.py
+# or with a custom port:
+python accra_dashboard.py --port 8080
 ```
 
-> District models omit macro regressors (the per-district CSVs carry only price columns). For regressor-augmented district forecasts, join the district series on `ds` to the macro columns from `accra_home_price_index.csv`.
+The Forecast, Prime Forecast, and District Forecast tabs share a common two-panel layout:
+- **Upper panel (72%):** historical actuals (area fill), test-period predicted vs actual with 90% CI band, three scenario lines (2025–2026) each with their own CI shading
+- **Lower panel (28%):** monthly residual bar chart over the 2023–2024 test period
+- **Info cards:** dynamic MAE / RMSE / MAPE card and Dec 2026 scenario targets, both updating when the area/district selector changes
 
-### 12.5 Prime Areas Forecasting
+```
+models/
+├── ahpi_prophet_model.json       ← mid-market production model
+├── ahpi_scaler.pkl               ← mid-market StandardScaler
+├── prime_prophet_{slug}.json     ← 6 prime-area models
+├── prime_scaler.pkl              ← prime StandardScaler (shared)
+├── district_prophet_{slug}.json  ← 5 district models
+└── district_scaler.pkl           ← district StandardScaler (shared)
 
-Prime area forecasts should account for the **USD-anchored** nature of pricing. Consider modelling in USD/sqm rather than the GHS-based AHPI if forward exchange-rate scenarios are uncertain:
-
-```python
-from prophet import Prophet
-import pandas as pd
-
-df = pd.read_csv("data/accra_prime_prices.csv", parse_dates=["ds"])
-
-# Model in USD/sqm for exchange-rate-neutral forecast
-area = "East Legon"
-sub = df[df["district"] == area][["ds", "price_usd_per_sqm"]].rename(
-    columns={"price_usd_per_sqm": "y"}
-)
-
-m = Prophet(
-    changepoints=["2014-01-01", "2022-01-01"],
-    changepoint_prior_scale=0.3,   # lower — prime prices are smoother
-    seasonality_mode="additive",   # ±1% flat swing suits additive better
-)
-m.fit(sub)
-
-future = m.make_future_dataframe(periods=24, freq="MS")
-forecast = m.predict(future)
-
-# Convert back to GHS using your forward exchange rate assumption
-forward_rate = 16.0  # example: 16 GHS/USD in 2026
-forecast["price_ghs_forecast"] = forecast["yhat"] * forward_rate
+forecasts/
+├── ahpi_test_eval.csv
+├── ahpi_forecast_{bear,base,bull}.csv
+├── prime_test_eval_{slug}.csv          (×6)
+├── prime_forecast_{scen}_{slug}.csv    (×18)
+├── prime_test_summary.csv
+├── district_test_eval_{slug}.csv       (×5)
+├── district_forecast_{scen}_{slug}.csv (×15)
+└── district_test_summary.csv
 ```
 
 ---
@@ -664,6 +746,7 @@ forecast["price_ghs_forecast"] = forecast["yhat"] * forward_rate
 
 ---
 
-*Document updated: March 2026 · Dataset version: 2.0 · Index base year: 2015 = 100*
+*Document updated: March 2026 · Dataset version: 2.1 · Index base year: 2015 = 100*
 *Three datasets: aggregate mid-market (180 × 22), per-district (900 × 5), prime areas (1,080 × 5)*
+*Prophet models: 12 trained (composite + 6 prime + 5 district) · Scenarios: Bear / Base / Bull (2025–2026) · Dashboard: 10-tab interactive Dash app (`accra_dashboard.py`)*
 *AHPI is an estimated index for research and forecasting purposes. It should not be used as the sole basis for individual investment decisions.*
