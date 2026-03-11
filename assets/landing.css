@@ -1,0 +1,80 @@
+/* ── AHPI Landing page ─────────────────────────────────────────────────────── */
+
+/* Entrance animations */
+@keyframes fadeInUp {
+    from { opacity: 0; transform: translateY(28px); }
+    to   { opacity: 1; transform: translateY(0);    }
+}
+
+@keyframes pulse-glow {
+    0%, 100% { text-shadow: 0 0 24px rgba(212, 160, 23, 0.3); }
+    50%       { text-shadow: 0 0 48px rgba(212, 160, 23, 0.6); }
+}
+
+.ahpi-hero {
+    animation: fadeInUp 0.65s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+.ahpi-stats {
+    animation: fadeInUp 0.65s 0.14s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.ahpi-roles {
+    animation: fadeInUp 0.65s 0.28s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.ahpi-footer-row {
+    animation: fadeInUp 0.5s 0.42s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Hero title glow */
+.ahpi-title-glow {
+    animation: pulse-glow 3.5s ease-in-out infinite;
+}
+
+/* Role cards */
+.ahpi-role-card {
+    transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+    cursor: pointer;
+    text-decoration: none !important;
+}
+.ahpi-role-card:hover {
+    transform: translateY(-7px);
+    border-color: #d4a017 !important;
+    box-shadow: 0 16px 40px rgba(212, 160, 23, 0.18) !important;
+}
+
+/* Stat chips */
+.ahpi-stat-chip {
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.ahpi-stat-chip:hover {
+    transform: scale(1.05);
+    box-shadow: 0 6px 20px rgba(212, 160, 23, 0.12);
+}
+
+/* "Continue without profile" link */
+.ahpi-skip-link {
+    color: #8b949e;
+    font-size: 0.85rem;
+    text-decoration: none;
+    border-bottom: 1px solid #30363d;
+    padding-bottom: 2px;
+    transition: color 0.15s ease, border-color 0.15s ease;
+}
+.ahpi-skip-link:hover {
+    color: #d4a017;
+    border-color: #d4a017;
+}
+
+/* Divider between landing sections */
+.ahpi-section-divider {
+    border: none;
+    border-top: 1px solid #30363d;
+    margin: 0;
+}
+
+/* Role banner (in dashboard) */
+.ahpi-role-banner-btn {
+    transition: color 0.12s ease;
+}
+.ahpi-role-banner-btn:hover {
+    color: #d4a017 !important;
+}

@@ -13,3 +13,6 @@ lxml
 yfinance
 dash
 dash-bootstrap-components
+gunicorn
+dash-extensions
+dash-leaflet

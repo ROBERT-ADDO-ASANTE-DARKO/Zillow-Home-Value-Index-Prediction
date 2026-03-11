@@ -20,16 +20,38 @@ Run
   python accra_dashboard.py --port 8080
 """
 
+import io
+import json
+import math
+import zipfile
 import os
 import sys
 import warnings
+import datetime
 import numpy as np
 import pandas as pd
 import dash
-from dash import dcc, html, Input, Output, State
+from dash import dcc, html, Input, Output, State, ALL
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
+import plotly.io as pio
 from plotly.subplots import make_subplots
+
+# dash-leaflet — GIS choropleth maps
+import dash_leaflet as dl
+from dash_extensions.javascript import assign
+
+# reportlab — PDF generation
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors as rl_colors
+from reportlab.lib.units import mm
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+    HRFlowable, Image as RLImage,
+)
+from reportlab.platypus import KeepTogether
 
 warnings.filterwarnings("ignore")
 
@@ -273,6 +295,298 @@ def _make_snapshots(df: pd.DataFrame) -> dict:
 
 DISTRICT_SNAP = _make_snapshots(DF_DISTRICT)
 PRIME_SNAP    = _make_snapshots(DF_PRIME)
+
+# Global bounds across the full 2010-2029 timeline for a consistent animation
+# color scale (prevents each frame from looking the same due to per-frame rescaling).
+# AHPI upper bound is set above the max forecast value (~928) for headroom.
+_ANIM_BOUNDS: dict[str, tuple[float, float]] = {
+    "ahpi": (
+        float(min(DF_DISTRICT["y"].min(), DF_PRIME["y"].min())),
+        950.0,
+    ),
+    "usd_sqm": (
+        float(min(DF_DISTRICT["price_usd_per_sqm"].min(), DF_PRIME["price_usd_per_sqm"].min())),
+        float(max(DF_DISTRICT["price_usd_per_sqm"].max(), DF_PRIME["price_usd_per_sqm"].max())),
+    ),
+    "ghs_sqm": (
+        float(min(DF_DISTRICT["price_ghs_per_sqm"].min(), DF_PRIME["price_ghs_per_sqm"].min())),
+        float(max(DF_DISTRICT["price_ghs_per_sqm"].max(), DF_PRIME["price_ghs_per_sqm"].max())),
+    ),
+}
+
+# ── GeoJSON boundaries ─────────────────────────────────────────────────────────
+_GEO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "data", "accra_boundaries.geojson")
+with open(_GEO_PATH) as _f:
+    BOUNDARIES_GEOJSON: dict = json.load(_f)
+
+# Build lookup: name → feature index (for efficient access)
+_BOUNDARY_IDX: dict[str, int] = {
+    feat["properties"]["name"]: i
+    for i, feat in enumerate(BOUNDARIES_GEOJSON["features"])
+}
+
+# ── GIS colour scales ──────────────────────────────────────────────────────────
+# Continuous colour ramps for choropleth use (8-stop tuples)
+_CS_GOLD_TO_RED = [
+    [0.0,  "#0d1117"],
+    [0.15, "#1a2a0a"],
+    [0.30, "#2d5a1a"],
+    [0.45, "#a0850a"],
+    [0.60, "#d4a017"],
+    [0.70, "#e07820"],
+    [0.80, "#d05030"],
+    [1.0,  "#f85149"],
+]
+_CS_BLUE_TO_GREEN = [
+    [0.0,  "#0d1117"],
+    [0.15, "#0a1e30"],
+    [0.30, "#0d3b5e"],
+    [0.45, "#1060a0"],
+    [0.60, "#3090d0"],
+    [0.75, "#30b060"],
+    [0.90, "#3fb950"],
+    [1.0,  "#a0f070"],
+]
+_CS_DIVERGE = [           # for growth vs decline (red → neutral → green)
+    [0.0,  "#f85149"],
+    [0.25, "#a03030"],
+    [0.45, "#30363d"],
+    [0.55, "#30363d"],
+    [0.75, "#207840"],
+    [1.0,  "#3fb950"],
+]
+
+
+def _hex_to_rgba(hex_color: str, alpha: float = 0.75) -> str:
+    """Convert #RRGGBB to rgba(r,g,b,alpha)."""
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+def _interpolate_color(value: float, stops: list) -> str:
+    """Map a 0-1 value to a colour using the given colour-scale stops."""
+    v = max(0.0, min(1.0, value))
+    for i in range(len(stops) - 1):
+        lo_v, lo_c = stops[i]
+        hi_v, hi_c = stops[i + 1]
+        if lo_v <= v <= hi_v:
+            t = (v - lo_v) / (hi_v - lo_v + 1e-9)
+            lo_h = lo_c.lstrip("#")
+            hi_h = hi_c.lstrip("#")
+            r = int(int(lo_h[0:2], 16) * (1 - t) + int(hi_h[0:2], 16) * t)
+            g = int(int(lo_h[2:4], 16) * (1 - t) + int(hi_h[2:4], 16) * t)
+            b = int(int(lo_h[4:6], 16) * (1 - t) + int(hi_h[4:6], 16) * t)
+            return f"#{r:02x}{g:02x}{b:02x}"
+    return stops[-1][1]
+
+
+def _normalise(val: float, lo: float, hi: float) -> float:
+    return (val - lo) / (hi - lo + 1e-9) if hi > lo else 0.5
+
+
+def _build_price_geojson(metric: str = "price_usd_per_sqm") -> dict:
+    """
+    Return a copy of BOUNDARIES_GEOJSON with price data injected into
+    each feature's properties (for Plotly choropleth and Leaflet styling).
+    """
+    all_snaps = {**DISTRICT_SNAP, **PRIME_SNAP}
+    vals = [all_snaps[n].get(metric, 0) for n in all_snaps]
+    lo, hi = min(vals), max(vals)
+
+    gj = json.loads(json.dumps(BOUNDARIES_GEOJSON))   # deep copy
+    for feat in gj["features"]:
+        name = feat["properties"]["name"]
+        snap = all_snaps.get(name, {})
+        v    = snap.get(metric, 0)
+        feat["properties"]["value"]     = round(v, 1)
+        feat["properties"]["norm"]      = round(_normalise(v, lo, hi), 4)
+        feat["properties"]["ahpi"]      = round(snap.get("ahpi", 0), 1)
+        feat["properties"]["ghs_sqm"]   = round(snap.get("ghs_sqm", 0), 0)
+        feat["properties"]["usd_sqm"]   = round(snap.get("usd_sqm", 0), 0)
+        feat["properties"]["usd_pct"]   = round(snap.get("usd_pct", 0), 1)
+        feat["properties"]["fill"]      = _interpolate_color(
+            _normalise(v, lo, hi), _CS_GOLD_TO_RED)
+    return gj, lo, hi
+
+
+def _build_forecast_geojson(scenario: str = "base", year: int = 2027) -> dict:
+    """
+    Return a copy of BOUNDARIES_GEOJSON annotated with forecast AHPI and
+    % growth vs Dec 2024 for the chosen scenario/year.
+    """
+    gj = json.loads(json.dumps(BOUNDARIES_GEOJSON))   # deep copy
+    growths = []
+    for feat in gj["features"]:
+        name = feat["properties"]["name"]
+        mkt  = "composite" if name not in (DISTRICTS + PRIME_AREAS) else name
+        fc   = _get_fc_dec(mkt, scenario, year)
+        hist = _get_hist_dec(mkt, 2024)
+        if fc is not None and hist is not None:
+            ahpi_now  = float(hist.get("y", 1))
+            ahpi_fc   = float(fc["yhat"])
+            growth    = (ahpi_fc - ahpi_now) / ahpi_now * 100
+        else:
+            growth = 0.0
+        feat["properties"]["growth_pct"] = round(growth, 1)
+        feat["properties"]["fc_ahpi"]    = round(float(fc["yhat"]), 1) if fc is not None else None
+        growths.append(growth)
+
+    lo, hi = min(growths), max(growths)
+    mid    = (lo + hi) / 2
+    for feat in gj["features"]:
+        g    = feat["properties"]["growth_pct"]
+        # Normalise: 0=lo, 0.5=mid, 1=hi (diverging from neutral)
+        norm = _normalise(g, lo, hi)
+        feat["properties"]["norm"]   = round(norm, 4)
+        feat["properties"]["fill"]   = _interpolate_color(norm, _CS_BLUE_TO_GREEN)
+    return gj, lo, hi
+
+
+def _build_timeline_geojson(year: int, metric: str = "usd_sqm",
+                             scenario: str = "base") -> tuple[dict, float, float]:
+    """
+    Build a GeoJSON snapshot for a specific year.
+
+    - Years 2010-2024: pulls actual December values from historical CSVs.
+    - Years 2025-2029: uses Prophet forecast (AHPI only; metric is ignored and
+      forced to 'ahpi' because USD/GHS predictions are unavailable).
+
+    Color normalisation uses _ANIM_BOUNDS (fixed global range) so that the
+    animation frames are directly comparable across years.
+    """
+    col_map = {
+        "usd_sqm": "price_usd_per_sqm",
+        "ghs_sqm": "price_ghs_per_sqm",
+        "ahpi":    "y",
+    }
+    # Forecast years carry AHPI only
+    eff_metric = "ahpi" if year >= 2025 else (metric or "usd_sqm")
+    col        = col_map.get(eff_metric, "price_usd_per_sqm")
+    lo, hi     = _ANIM_BOUNDS.get(eff_metric, _ANIM_BOUNDS["ahpi"])
+
+    gj = json.loads(json.dumps(BOUNDARIES_GEOJSON))   # deep copy
+    for feat in gj["features"]:
+        name = feat["properties"]["name"]
+
+        if year <= 2024:
+            if name in DISTRICTS:
+                row = _HIST_DEC_DISTRICT.get(name, {}).get(year)
+            elif name in PRIME_AREAS:
+                row = _HIST_DEC_PRIME.get(name, {}).get(year)
+            else:
+                row = None
+
+            if row is not None:
+                v      = float(row[col])
+                ahpi_v = float(row["y"])
+                ghs_v  = float(row["price_ghs_per_sqm"])
+                usd_v  = float(row["price_usd_per_sqm"])
+            else:
+                v = ahpi_v = ghs_v = usd_v = 0.0
+        else:
+            mkt = name if (name in DISTRICTS or name in PRIME_AREAS) else "composite"
+            fc  = _get_fc_dec(mkt, scenario, year)
+            ahpi_v = float(fc["yhat"]) if fc is not None else 0.0
+            v      = ahpi_v
+            ghs_v  = 0.0
+            usd_v  = 0.0
+
+        norm = _normalise(v, lo, hi)
+        feat["properties"]["value"]     = round(v, 1)
+        feat["properties"]["norm"]      = round(norm, 4)
+        feat["properties"]["ahpi"]      = round(ahpi_v, 1)
+        feat["properties"]["ghs_sqm"]   = round(ghs_v, 0)
+        feat["properties"]["usd_sqm"]   = round(usd_v, 0)
+        feat["properties"]["year"]      = year
+        feat["properties"]["projected"] = year >= 2025
+        feat["properties"]["fill"]      = _interpolate_color(norm, _CS_GOLD_TO_RED)
+
+    return gj, lo, hi
+
+
+# JavaScript style functions for dash-leaflet GeoJSON layers
+_style_price = assign("""function(feature) {
+    return {
+        fillColor:   feature.properties.fill || '#30363d',
+        fillOpacity: 0.72,
+        color:       '#d4a017',
+        weight:      1.5,
+        opacity:     0.9,
+        dashArray:   feature.properties.type === 'prime' ? '4 3' : null,
+    };
+}""")
+
+_style_forecast = assign("""function(feature) {
+    return {
+        fillColor:   feature.properties.fill || '#30363d',
+        fillOpacity: 0.72,
+        color:       feature.properties.growth_pct >= 0 ? '#3fb950' : '#f85149',
+        weight:      1.5,
+        opacity:     0.9,
+        dashArray:   feature.properties.type === 'prime' ? '4 3' : null,
+    };
+}""")
+
+_on_each_feature_price = assign("""function(feature, layer) {
+    var p = feature.properties;
+    layer.bindTooltip(
+        '<div style="background:#161b22;border:1px solid #30363d;padding:8px 12px;border-radius:6px;font-family:monospace;min-width:180px;">' +
+        '<div style="color:#d4a017;font-weight:700;font-size:13px;margin-bottom:4px;">' + p.name + '</div>' +
+        '<div style="color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:0.06em;">' + p.type + '</div>' +
+        '<hr style="border-color:#30363d;margin:5px 0"/>' +
+        '<div style="color:#e6edf3;font-size:12px;">AHPI Dec 2024: <b>' + p.ahpi.toFixed(1) + '</b></div>' +
+        '<div style="color:#e6edf3;font-size:12px;">GHS/sqm: <b>' + p.ghs_sqm.toLocaleString() + '</b></div>' +
+        '<div style="color:#e6edf3;font-size:12px;">USD/sqm: <b>' + p.usd_sqm.toLocaleString() + '</b></div>' +
+        '<div style="color:#3fb950;font-size:12px;">USD gain 2010–24: <b>+' + p.usd_pct.toFixed(1) + '%</b></div>' +
+        '</div>',
+        {sticky: true, opacity: 1}
+    );
+    layer.on('mouseover', function(e) { layer.setStyle({fillOpacity: 0.92, weight: 3}); });
+    layer.on('mouseout',  function(e) { layer.setStyle({fillOpacity: 0.72, weight: 1.5}); });
+}""")
+
+_on_each_feature_forecast = assign("""function(feature, layer) {
+    var p = feature.properties;
+    var growthColor = p.growth_pct >= 0 ? '#3fb950' : '#f85149';
+    var sign = p.growth_pct >= 0 ? '+' : '';
+    layer.bindTooltip(
+        '<div style="background:#161b22;border:1px solid #30363d;padding:8px 12px;border-radius:6px;font-family:monospace;min-width:190px;">' +
+        '<div style="color:#d4a017;font-weight:700;font-size:13px;margin-bottom:4px;">' + p.name + '</div>' +
+        '<div style="color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:0.06em;">' + p.type + '</div>' +
+        '<hr style="border-color:#30363d;margin:5px 0"/>' +
+        '<div style="color:#e6edf3;font-size:12px;">Forecast AHPI: <b>' + (p.fc_ahpi ? p.fc_ahpi.toFixed(1) : "—") + '</b></div>' +
+        '<div style="font-size:13px;font-weight:700;color:' + growthColor + ';">Growth vs 2024: ' + sign + p.growth_pct.toFixed(1) + '%</div>' +
+        '</div>',
+        {sticky: true, opacity: 1}
+    );
+    layer.on('mouseover', function(e) { layer.setStyle({fillOpacity: 0.92, weight: 3}); });
+    layer.on('mouseout',  function(e) { layer.setStyle({fillOpacity: 0.72, weight: 1.5}); });
+}""")
+
+
+_on_each_feature_timeline = assign("""function(feature, layer) {
+    var p = feature.properties;
+    var proj = p.projected;
+    var priceRows = proj
+        ? '<div style="color:#58a6ff;font-size:11px;font-style:italic;margin-top:3px;">Projected — AHPI only</div>'
+        : '<div style="color:#e6edf3;font-size:12px;">GHS/sqm: <b>' + (p.ghs_sqm ? p.ghs_sqm.toLocaleString() : '—') + '</b></div>' +
+          '<div style="color:#e6edf3;font-size:12px;">USD/sqm: <b>' + (p.usd_sqm ? p.usd_sqm.toLocaleString() : '—') + '</b></div>';
+    layer.bindTooltip(
+        '<div style="background:#161b22;border:1px solid #30363d;padding:8px 12px;border-radius:6px;font-family:monospace;min-width:180px;">' +
+        '<div style="color:#d4a017;font-weight:700;font-size:13px;margin-bottom:4px;">' + p.name + '</div>' +
+        '<div style="color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:0.06em;">' + p.type + ' · ' + p.year + '</div>' +
+        '<hr style="border-color:#30363d;margin:5px 0"/>' +
+        '<div style="color:#e6edf3;font-size:12px;">AHPI' + (proj ? ' (proj)' : '') + ': <b>' + p.ahpi.toFixed(1) + '</b></div>' +
+        priceRows +
+        '</div>',
+        {sticky: true, opacity: 1}
+    );
+    layer.on('mouseover', function(e) { layer.setStyle({fillOpacity: 0.92, weight: 3}); });
+    layer.on('mouseout',  function(e) { layer.setStyle({fillOpacity: 0.72, weight: 1.5}); });
+}""")
+
 
 COMMODITY_META = {
     "gold_price_usd":   ("Gold (USD / troy oz)",  C["gold"],   "left"),
@@ -1031,6 +1345,22 @@ SCENARIO_STYLES = {
     "bull": (C["green"],  "dot",   "Bull  (GHS/USD → 12)"),
 }
 
+# Scenario FX endpoint (used by calculators)
+SCENARIO_FX   = {"bear": 20.0, "base": 15.0, "bull": 12.0}
+SCENARIO_TBILL = {"bear": 28.0, "base": 20.0, "bull": 15.0}   # annual GHS risk-free rate (%)
+USD_DEPOSIT_RATE = 5.0   # annual USD fixed-deposit benchmark (%)
+
+# Forecast years available (CSVs now cover Jan 2025 – Dec 2029)
+FC_YEARS     = list(range(2025, 2030))
+FC_YEAR_OPTS = [{"label": str(y), "value": y} for y in FC_YEARS]
+
+
+def _fc_dec(df_fc: pd.DataFrame, year: int) -> pd.Series:
+    """Return the December row for a given forecast year."""
+    mask = (df_fc["ds"].dt.year == year) & (df_fc["ds"].dt.month == 12)
+    rows = df_fc[mask]
+    return rows.iloc[0] if len(rows) else df_fc.iloc[-1]
+
 
 def build_forecast_fig(show_ci: bool = True) -> go.Figure:
     """
@@ -1321,30 +1651,29 @@ def _build_prime_metrics_div(area: str) -> html.Div:
         _stat_row("MAPE", f"{mape:.1f}%",          C["red"]),
         html.Hr(style={"borderColor": C["border"], "margin": "8px 0"}),
         html.Div(note, style={"fontSize": "0.75rem", "color": C["muted"]}),
+        _METRIC_GLOSSARY,
     ])
 
 
-def _build_prime_targets_div(area: str) -> html.Div:
+def _build_prime_targets_div(area: str, year: int = 2026) -> html.Div:
     rows = []
     for sc in ("bear", "base", "bull"):
         color, _, label = SCENARIO_STYLES[sc]
         fc_df = _PRIME_FC_AGG[sc] if area == "all" else _PRIME_FC[(sc, area)]
-        dec26 = fc_df.iloc[-1]
+        dec   = _fc_dec(fc_df, year)
         rows.append(html.Div([
             html.Span("● ", style={"color": color, "fontSize": "1rem"}),
             html.Span(f"{label}: ", style={"color": C["muted"], "fontSize": "0.8rem"}),
-            html.Span(f"{dec26['yhat']:.1f}",
+            html.Span(f"{dec['yhat']:.1f}",
                       style={"color": color, "fontWeight": "700", "fontSize": "0.9rem"}),
-            html.Span(f"  [{dec26['yhat_lower']:.1f} – {dec26['yhat_upper']:.1f}]",
+            html.Span(f"  [{dec['yhat_lower']:.1f} – {dec['yhat_upper']:.1f}]",
                       style={"color": C["muted"], "fontSize": "0.78rem"}),
         ], className="mb-2"))
     return html.Div([
         *rows,
         html.Hr(style={"borderColor": C["border"], "margin": "8px 0"}),
-        html.Div(
-            "Dec 2026 AHPI targets under each scenario. 90% credible interval in brackets.",
-            style={"fontSize": "0.75rem", "color": C["muted"]},
-        ),
+        html.Div(f"Dec {year} AHPI under each scenario. 90% credible interval in brackets.",
+                 style={"fontSize": "0.75rem", "color": C["muted"]}),
     ])
 
 
@@ -1502,30 +1831,29 @@ def _build_district_metrics_div(district: str) -> html.Div:
         _stat_row("MAPE", f"{mape:.1f}%",          C["red"]),
         html.Hr(style={"borderColor": C["border"], "margin": "8px 0"}),
         html.Div(note, style={"fontSize": "0.75rem", "color": C["muted"]}),
+        _METRIC_GLOSSARY,
     ])
 
 
-def _build_district_targets_div(district: str) -> html.Div:
+def _build_district_targets_div(district: str, year: int = 2026) -> html.Div:
     rows = []
     for sc in ("bear", "base", "bull"):
         color, _, label = SCENARIO_STYLES[sc]
         fc_df = _DISTRICT_FC_AGG[sc] if district == "all" else _DISTRICT_FC[(sc, district)]
-        dec26 = fc_df.iloc[-1]
+        dec   = _fc_dec(fc_df, year)
         rows.append(html.Div([
             html.Span("● ", style={"color": color, "fontSize": "1rem"}),
             html.Span(f"{label}: ", style={"color": C["muted"], "fontSize": "0.8rem"}),
-            html.Span(f"{dec26['yhat']:.1f}",
+            html.Span(f"{dec['yhat']:.1f}",
                       style={"color": color, "fontWeight": "700", "fontSize": "0.9rem"}),
-            html.Span(f"  [{dec26['yhat_lower']:.1f} – {dec26['yhat_upper']:.1f}]",
+            html.Span(f"  [{dec['yhat_lower']:.1f} – {dec['yhat_upper']:.1f}]",
                       style={"color": C["muted"], "fontSize": "0.78rem"}),
         ], className="mb-2"))
     return html.Div([
         *rows,
         html.Hr(style={"borderColor": C["border"], "margin": "8px 0"}),
-        html.Div(
-            "Dec 2026 AHPI targets under each scenario. 90% credible interval in brackets.",
-            style={"fontSize": "0.75rem", "color": C["muted"]},
-        ),
+        html.Div(f"Dec {year} AHPI under each scenario. 90% credible interval in brackets.",
+                 style={"fontSize": "0.75rem", "color": C["muted"]}),
     ])
 
 
@@ -1537,8 +1865,10 @@ def kpi_card(label, val_id, icon, color=C["gold"]):
                 html.Div([
                     html.Span(icon, style={"fontSize": "1.2rem", "marginRight": "6px"}),
                     html.Span(label,
+                              id=f"{val_id}-label",
                               style={"fontSize": "0.68rem", "textTransform": "uppercase",
-                                     "letterSpacing": "0.07em", "color": C["muted"]}),
+                                     "letterSpacing": "0.07em", "color": C["muted"],
+                                     "cursor": "help", "borderBottom": f"1px dotted {C['border']}"}),
                 ], className="d-flex align-items-center mb-1"),
                 html.Div(id=val_id,
                          style={"fontSize": "1.35rem", "fontWeight": "700",
@@ -1569,6 +1899,147 @@ def toggle_btn(btn_id, label, active=True):
         className="me-1",
         style={"fontSize": "0.75rem", "padding": "2px 10px"},
     )
+
+
+def _dl_btn(btn_id, label="⬇  Download CSV"):
+    """Small right-aligned download trigger button."""
+    return html.Div(
+        dbc.Button(label, id=btn_id, size="sm", outline=True, color="secondary",
+                   style={"fontSize": "0.72rem", "padding": "2px 10px"}),
+        className="text-end mb-1",
+    )
+
+
+def _zip_dfs(files: dict) -> bytes:
+    """Zip a {filename: DataFrame} dict into a bytes object."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fname, df in files.items():
+            zf.writestr(fname, df.to_csv(index=False))
+    return buf.getvalue()
+
+
+# ── methodology modal ──────────────────────────────────────────────────────────
+_METHODOLOGY_MODAL = dbc.Modal([
+    dbc.ModalHeader(dbc.ModalTitle("About the Accra Home Price Index (AHPI)"),
+                    close_button=True),
+    dbc.ModalBody([
+        html.H6("What is the AHPI?", style={"color": C["gold"], "marginBottom": "6px"}),
+        html.P(
+            "The Accra Home Price Index measures how residential property values in Accra, Ghana "
+            "have changed over time, expressed as an index where January 2015 = 100. "
+            "An AHPI of 400 means property prices are 4× their 2015 level in Ghanaian Cedis (GHS). "
+            "Think of it like a stock market index — but for Accra real estate.",
+            style={"fontSize": "0.85rem"},
+        ),
+        html.H6("Two markets tracked", style={"color": C["gold"], "marginBottom": "6px"}),
+        dbc.Row([
+            dbc.Col(html.Div([
+                html.Strong("Mid-Market Districts (5 areas)"),
+                html.Br(),
+                html.Small(
+                    "Spintex Road · Adenta · Tema · Dome · Kasoa. "
+                    "Prices are quoted in GHS. AHPI reflects true GHS appreciation.",
+                    style={"color": C["muted"]},
+                ),
+            ], style={"backgroundColor": C["hover"], "padding": "10px",
+                      "borderRadius": "6px", "border": f"1px solid {C['border']}"}), md=6),
+            dbc.Col(html.Div([
+                html.Strong("Prime Areas (6 locations)"),
+                html.Br(),
+                html.Small(
+                    "East Legon · Cantonments · Airport Residential · Labone / Roman Ridge · "
+                    "Dzorwulu / Abelenkpe · Trasacco Valley. Prices are USD-anchored. "
+                    "AHPI here reflects USD appreciation plus GHS depreciation — "
+                    "so the prime index grows much faster in GHS terms.",
+                    style={"color": C["muted"]},
+                ),
+            ], style={"backgroundColor": C["hover"], "padding": "10px",
+                      "borderRadius": "6px", "border": f"1px solid {C['border']}"}), md=6),
+        ], className="mb-3"),
+        html.H6("Data construction", style={"color": C["gold"], "marginBottom": "6px"}),
+        html.P(
+            "Quarterly USD/sqm benchmarks from Global Property Guide, Numbeo, JLL Africa, and "
+            "Knight Frank Africa are converted to GHS using Bank of Ghana exchange rates, "
+            "normalised so that January 2015 = 100, then interpolated to monthly frequency. "
+            "Dataset covers January 2010 – December 2024 (180 months).",
+            style={"fontSize": "0.85rem"},
+        ),
+        html.H6("What are the 2025–2026 forecasts?",
+                style={"color": C["gold"], "marginBottom": "6px"}),
+        html.P(
+            "Facebook Prophet — a machine-learning time-series model — was trained on 15 years of "
+            "historical data using six economic drivers: GHS/USD exchange rate, inflation (CPI), "
+            "urban population growth, broad money supply (M2), gold price, and cocoa price. "
+            "Separate models were built for the composite mid-market index, each of the 6 prime areas, "
+            "and each of the 5 mid-market districts (12 models total).",
+            style={"fontSize": "0.85rem"},
+        ),
+        html.H6("Bear / Base / Bull scenarios",
+                style={"color": C["gold"], "marginBottom": "6px"}),
+        dbc.Row([
+            dbc.Col(html.Div([
+                html.Span("🐻  Bear", style={"color": C["red"], "fontWeight": "700"}),
+                html.Br(),
+                html.Small(
+                    "GHS/USD reaches 20 by end-2026. Continued cedi depreciation, "
+                    "inflation stays elevated (~31%). Worst case for GHS-earning buyers; "
+                    "best case for USD-denominated asset holders.",
+                    style={"color": C["muted"]},
+                ),
+            ], style={"backgroundColor": C["hover"], "padding": "10px",
+                      "borderRadius": "6px", "border": f"1px solid {C['border']}"}), md=4),
+            dbc.Col(html.Div([
+                html.Span("📊  Base", style={"color": C["blue"], "fontWeight": "700"}),
+                html.Br(),
+                html.Small(
+                    "GHS/USD stabilises at 15. Gradual cedi recovery, "
+                    "inflation moderating (~20%). Most likely outcome under the current "
+                    "IMF Extended Credit Facility programme.",
+                    style={"color": C["muted"]},
+                ),
+            ], style={"backgroundColor": C["hover"], "padding": "10px",
+                      "borderRadius": "6px", "border": f"1px solid {C['border']}"}), md=4),
+            dbc.Col(html.Div([
+                html.Span("🐂  Bull", style={"color": C["green"], "fontWeight": "700"}),
+                html.Br(),
+                html.Small(
+                    "GHS/USD recovers to 12. Strong cedi driven by high cocoa and gold export "
+                    "revenues, inflation falls to ~14%. Optimistic scenario.",
+                    style={"color": C["muted"]},
+                ),
+            ], style={"backgroundColor": C["hover"], "padding": "10px",
+                      "borderRadius": "6px", "border": f"1px solid {C['border']}"}), md=4),
+        ], className="mb-3"),
+        html.H6("Understanding accuracy metrics",
+                style={"color": C["gold"], "marginBottom": "6px"}),
+        dbc.Table([
+            html.Thead(html.Tr([
+                html.Th("Metric"), html.Th("What it measures"), html.Th("How to read it"),
+            ])),
+            html.Tbody([
+                html.Tr([html.Td("MAE"), html.Td("Mean Absolute Error — average error in index points"),
+                         html.Td("28.5 pts → predictions were off by 28.5 AHPI pts on average")]),
+                html.Tr([html.Td("RMSE"), html.Td("Root Mean Squared Error — like MAE but penalises large errors more"),
+                         html.Td("Useful for catching occasional big misses")]),
+                html.Tr([html.Td("MAPE"), html.Td("Mean Absolute Percentage Error — error as % of actual value"),
+                         html.Td("7.8% → predicted within ±7.8% of actual, on average")]),
+            ]),
+        ], size="sm", bordered=True, striped=True, className="mb-3",
+           style={"color": C["text"], "backgroundColor": C["card"]}),
+        html.Hr(style={"borderColor": C["border"]}),
+        html.Small(
+            "AHPI is an estimated research index. It should not be used as the sole basis for "
+            "investment or lending decisions. Forecasts are illustrative scenario projections, "
+            "not financial advice. Dataset version 2.1 · January 2010 – December 2024.",
+            style={"color": C["muted"]},
+        ),
+    ]),
+    dbc.ModalFooter(
+        dbc.Button("Close", id="methodology-modal-close", color="secondary", size="sm"),
+    ),
+], id="methodology-modal", size="lg", is_open=False, scrollable=True,
+   style={"fontFamily": "'Inter', 'Segoe UI', Arial, sans-serif"})
 
 
 # ── range slider ──────────────────────────────────────────────────────────────
@@ -1647,6 +2118,8 @@ tab_overview = html.Div([
                       style={"color": C["muted"], "fontSize": "0.75rem",
                              "fontStyle": "italic", "display": "none"}),
         ], className="d-flex align-items-center flex-wrap mb-2"),
+        _dl_btn("dl-overview-btn"),
+        dcc.Download(id="dl-overview"),
         dcc.Graph(id="ahpi-chart", config={"displayModeBar": True,
                                             "modeBarButtonsToRemove": ["lasso2d"],
                                             "toImageButtonOptions": {"scale": 2}}),
@@ -1678,6 +2151,8 @@ tab_macro = html.Div([
                 dbc.Switch(id="macro-normalise", value=False, label=""),
             ], md=3, className="d-flex flex-column justify-content-start"),
         ], className="mb-2"),
+        _dl_btn("dl-macro-btn"),
+        dcc.Download(id="dl-macro"),
         dcc.Graph(id="macro-chart", config={"displayModeBar": True,
                                              "modeBarButtonsToRemove": ["lasso2d"],
                                              "toImageButtonOptions": {"scale": 2}}),
@@ -1692,6 +2167,8 @@ tab_macro = html.Div([
 # ── tab: Commodities ──────────────────────────────────────────────────────────
 tab_commodities = html.Div([
     section_card(
+        _dl_btn("dl-commodities-btn"),
+        dcc.Download(id="dl-commodities"),
         dcc.Graph(id="commodity-chart",
                   config={"displayModeBar": True,
                           "modeBarButtonsToRemove": ["lasso2d"],
@@ -1774,6 +2251,8 @@ tab_districts = html.Div([
                 dbc.Switch(id="district-events", value=True, label=""),
             ], md=2, className="d-flex flex-column justify-content-start"),
         ], className="mb-2"),
+        _dl_btn("dl-districts-btn"),
+        dcc.Download(id="dl-districts"),
         dcc.Graph(id="district-chart",
                   config={"displayModeBar": True,
                           "modeBarButtonsToRemove": ["lasso2d"],
@@ -1817,6 +2296,8 @@ tab_prime = html.Div([
             "producing significantly higher nominal GHS growth than mid-market districts.",
             style={"fontSize": "0.78rem", "color": C["muted"], "marginBottom": "10px"},
         ),
+        _dl_btn("dl-prime-btn"),
+        dcc.Download(id="dl-prime"),
         dcc.Graph(id="prime-chart",
                   config={"displayModeBar": True,
                           "modeBarButtonsToRemove": ["lasso2d"],
@@ -1830,47 +2311,260 @@ tab_prime = html.Div([
 ])
 
 # ── tab: Map ──────────────────────────────────────────────────────────────────
+# ── GIS tile presets ──────────────────────────────────────────────────────────
+_TILE_OPTS = [
+    {"label": "Dark Matter",      "value": "dark"},
+    {"label": "Satellite",        "value": "satellite"},
+    {"label": "Positron",         "value": "positron"},
+    {"label": "OSM (light)",      "value": "osm"},
+]
+_TILE_URLS = {
+    "dark":      ("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+                  "© OpenStreetMap contributors © CARTO"),
+    "satellite": ("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                  "© Esri, Maxar, GeoEye, Earthstar Geographics, CNES/Airbus DS"),
+    "positron":  ("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+                  "© OpenStreetMap contributors © CARTO"),
+    "osm":       ("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+                  "© OpenStreetMap contributors"),
+}
+_MAP_CENTER = [5.610, -0.195]
+_MAP_ZOOM   = 11
+
+def _tile_layer(tile_key: str) -> dl.TileLayer:
+    url, attr = _TILE_URLS.get(tile_key, _TILE_URLS["dark"])
+    return dl.TileLayer(url=url, attribution=attr, maxZoom=19)
+
+
+def _legend_strip(stops: list, lo: float, hi: float, label: str,
+                  unit: str = "") -> html.Div:
+    """Inline colour-bar legend as a horizontal gradient strip."""
+    gradient = ", ".join(c for _, c in stops)
+    ticks = [lo, (lo + hi) / 2, hi]
+    tick_divs = html.Div([
+        html.Span(f"{v:,.0f}{unit}", style={"position": "absolute",
+                                             "left": f"{(v - lo) / (hi - lo + 1e-9) * 100:.0f}%",
+                                             "transform": "translateX(-50%)",
+                                             "fontSize": "0.65rem", "color": C["muted"],
+                                             "whiteSpace": "nowrap"})
+        for v in ticks
+    ], style={"position": "relative", "height": "16px", "marginTop": "2px"})
+    return html.Div([
+        html.Div(label, style={"fontSize": "0.7rem", "color": C["muted"],
+                               "marginBottom": "3px",
+                               "textTransform": "uppercase",
+                               "letterSpacing": "0.06em"}),
+        html.Div(style={
+            "background": f"linear-gradient(to right, {gradient})",
+            "height": "10px", "borderRadius": "4px",
+            "border": f"1px solid {C['border']}",
+        }),
+        tick_divs,
+    ], style={"width": "260px"})
+
+
 tab_map = html.Div([
+    # ── Location dot map (existing Plotly / Scattermap) ─────────────────────
+    html.Div(id="tab-map-location-panel", children=[
+        section_card(
+            dbc.Row([
+                dbc.Col([
+                    html.Label("Show locations", style={"fontSize": "0.78rem",
+                                                        "color": C["muted"]}),
+                    dbc.RadioItems(
+                        id="map-segment",
+                        options=[
+                            {"label": "Mid-Market Districts", "value": "mid"},
+                            {"label": "Prime Areas",          "value": "prime"},
+                            {"label": "Both",                 "value": "both"},
+                        ],
+                        value="both",
+                        inline=True,
+                        className="mt-1",
+                        inputStyle={"marginRight": "4px"},
+                        labelStyle={"marginRight": "16px", "fontSize": "0.82rem",
+                                    "color": C["text"]},
+                    ),
+                ], md=7),
+                dbc.Col([
+                    html.Div(
+                        "Marker size reflects Dec 2024 AHPI. Scroll or pinch to zoom.",
+                        style={"fontSize": "0.72rem", "color": C["muted"],
+                               "paddingTop": "10px"},
+                    ),
+                ], md=5),
+            ], className="mb-2"),
+            dcc.Graph(
+                id="map-chart",
+                config={
+                    "scrollZoom": True,
+                    "displayModeBar": True,
+                    "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+                    "toImageButtonOptions": {"scale": 2},
+                },
+                style={"height": "520px"},
+            ),
+        ),
+    ]),
+
+    # ── GIS Choropleth section ───────────────────────────────────────────────
+    html.Hr(style={"borderColor": C["border"], "margin": "0 0 12px 0"}),
+
     section_card(
+        # Controls row
         dbc.Row([
             dbc.Col([
-                html.Label("Show locations", style={"fontSize": "0.78rem",
-                                                    "color": C["muted"]}),
+                html.Div("Map layer", style={"fontSize": "0.75rem", "color": C["muted"],
+                                              "marginBottom": "3px"}),
                 dbc.RadioItems(
-                    id="map-segment",
+                    id="gis-layer",
                     options=[
-                        {"label": "Mid-Market Districts", "value": "mid"},
-                        {"label": "Prime Areas",          "value": "prime"},
-                        {"label": "Both",                 "value": "both"},
+                        {"label": "Price Heatmap",    "value": "price"},
+                        {"label": "Forecast Growth",  "value": "forecast"},
                     ],
-                    value="both",
+                    value="price",
                     inline=True,
-                    className="mt-1",
                     inputStyle={"marginRight": "4px"},
                     labelStyle={"marginRight": "16px", "fontSize": "0.82rem",
                                 "color": C["text"]},
                 ),
-            ], md=7),
+            ], md=3),
             dbc.Col([
-                html.Div(
-                    "Marker size reflects Dec 2024 AHPI. Scroll or pinch to zoom.",
-                    style={"fontSize": "0.72rem", "color": C["muted"],
-                           "paddingTop": "10px"},
+                html.Div("Price metric", style={"fontSize": "0.75rem", "color": C["muted"],
+                                                 "marginBottom": "3px"}),
+                dcc.Dropdown(
+                    id="gis-price-metric",
+                    options=[
+                        {"label": "USD / sqm",    "value": "usd_sqm"},
+                        {"label": "GHS / sqm",    "value": "ghs_sqm"},
+                        {"label": "AHPI (index)", "value": "ahpi"},
+                    ],
+                    value="usd_sqm", clearable=False,
+                    style={"backgroundColor": C["bg"], "fontSize": "0.82rem"},
                 ),
-            ], md=5),
-        ], className="mb-2"),
-        dcc.Graph(
-            id="map-chart",
-            config={
-                "scrollZoom": True,
-                "displayModeBar": True,
-                "modeBarButtonsToRemove": ["lasso2d", "select2d"],
-                "toImageButtonOptions": {"scale": 2},
-            },
-            style={"height": "560px"},
+            ], md=2),
+            dbc.Col([
+                html.Div("Forecast scenario", style={"fontSize": "0.75rem", "color": C["muted"],
+                                                      "marginBottom": "3px"}),
+                dcc.Dropdown(
+                    id="gis-scenario",
+                    options=[
+                        {"label": "Bear  (GHS/USD → 20)", "value": "bear"},
+                        {"label": "Base  (GHS/USD → 15)", "value": "base"},
+                        {"label": "Bull  (GHS/USD → 12)", "value": "bull"},
+                    ],
+                    value="base", clearable=False,
+                    style={"backgroundColor": C["bg"], "fontSize": "0.82rem"},
+                ),
+            ], md=2),
+            dbc.Col([
+                html.Div("Forecast year", style={"fontSize": "0.75rem", "color": C["muted"],
+                                                  "marginBottom": "3px"}),
+                dcc.Dropdown(
+                    id="gis-fc-year",
+                    options=FC_YEAR_OPTS, value=2027, clearable=False,
+                    style={"backgroundColor": C["bg"], "fontSize": "0.82rem"},
+                ),
+            ], md=2),
+            dbc.Col([
+                html.Div("Base tiles", style={"fontSize": "0.75rem", "color": C["muted"],
+                                               "marginBottom": "3px"}),
+                dcc.Dropdown(
+                    id="gis-tiles",
+                    options=_TILE_OPTS, value="dark", clearable=False,
+                    style={"backgroundColor": C["bg"], "fontSize": "0.82rem"},
+                ),
+            ], md=2),
+            dbc.Col([
+                html.Div("Export", style={"fontSize": "0.75rem", "color": C["muted"],
+                                           "marginBottom": "3px"}),
+                dbc.Button("⬇ GeoJSON", id="gis-dl-btn", size="sm", outline=True,
+                           color="secondary",
+                           style={"fontSize": "0.72rem", "padding": "2px 10px",
+                                  "width": "100%"}),
+                dcc.Download(id="gis-dl"),
+            ], md=1),
+        ], className="mb-2 g-2"),
+
+        # Legend
+        html.Div(id="gis-legend", style={"marginBottom": "8px"}),
+
+        # Leaflet map
+        dl.Map(
+            id="gis-map",
+            center=_MAP_CENTER,
+            zoom=_MAP_ZOOM,
+            style={"height": "520px", "width": "100%",
+                   "borderRadius": "6px", "border": f"1px solid {C['border']}"},
+            children=[
+                dl.TileLayer(
+                    url=_TILE_URLS["dark"][0],
+                    attribution=_TILE_URLS["dark"][1],
+                    maxZoom=19,
+                    id="gis-tile-layer",
+                ),
+                dl.GeoJSON(
+                    id="gis-geojson",
+                    data=None,
+                    style=_style_price,
+                    onEachFeature=_on_each_feature_price,
+                    zoomToBounds=False,
+                    zoomToBoundsOnClick=True,
+                    options=dict(preferCanvas=False),
+                ),
+                dl.ScaleControl(position="bottomleft"),
+            ],
         ),
+        html.Div(
+            "Polygons are approximate representations of neighbourhood boundaries "
+            "for visualisation purposes. Hover to see metrics. Click to zoom in.",
+            style={"fontSize": "0.68rem", "color": C["muted"],
+                   "fontStyle": "italic", "marginTop": "6px"},
+        ),
+
+        # ── Time-slider animation controls ───────────────────────────────────
+        dcc.Interval(id="gis-anim-interval", interval=900,
+                     n_intervals=0, disabled=True),
+        dbc.Row([
+            dbc.Col(
+                dbc.Button("▶", id="gis-anim-btn", size="sm", color="secondary",
+                           outline=True,
+                           style={"width": "36px", "height": "34px",
+                                  "padding": "0", "fontSize": "13px",
+                                  "lineHeight": "1"}),
+                width="auto", className="d-flex align-items-center pe-0",
+            ),
+            dbc.Col(
+                dcc.Slider(
+                    id="gis-anim-year",
+                    min=2010, max=2029, step=1, value=2024,
+                    marks={
+                        **{y: {"label": str(y),
+                               "style": {"color": C["muted"], "fontSize": "0.63rem"}}
+                           for y in range(2010, 2025, 2)},
+                        2024: {"label": "2024",
+                               "style": {"color": C["gold"], "fontSize": "0.63rem",
+                                         "fontWeight": "700"}},
+                        2025: {"label": "2025 →",
+                               "style": {"color": "#58a6ff", "fontSize": "0.63rem",
+                                         "fontWeight": "700"}},
+                        **{y: {"label": str(y),
+                               "style": {"color": "#58a6ff", "fontSize": "0.63rem"}}
+                           for y in range(2026, 2030, 2)},
+                    },
+                    tooltip={"placement": "top", "always_visible": False},
+                    updatemode="drag",
+                ),
+            ),
+            dbc.Col(
+                html.Div(id="gis-anim-badge",
+                         style={"fontSize": "0.7rem", "color": C["muted"],
+                                "textAlign": "right", "whiteSpace": "nowrap"}),
+                width="auto", className="d-flex align-items-center ps-2",
+            ),
+        ], className="g-1 mt-2 align-items-center"),
     ),
-])
+], style={"padding": "4px"})
 
 # ── tab: Forecast ──────────────────────────────────────────────────────────────
 def _stat_row(label, value, color=C["gold"]):
@@ -1879,6 +2573,11 @@ def _stat_row(label, value, color=C["gold"]):
         html.Span(value, style={"color": color, "fontWeight": "700", "fontSize": "0.9rem"}),
     ], className="mb-1")
 
+
+_METRIC_GLOSSARY = html.Div(
+    "MAE = avg error in pts · RMSE = penalises big errors · MAPE = error as % of actual.",
+    style={"fontSize": "0.72rem", "color": C["muted"], "fontStyle": "italic", "marginTop": "4px"},
+)
 
 _forecast_metrics_div = html.Div([
     _stat_row("MAE",  f"{_TEST_MAE:.2f} index pts",  C["gold"]),
@@ -1889,34 +2588,35 @@ _forecast_metrics_div = html.Div([
         "Evaluation model trained 2010–2022 only, tested on 2023–2024 (n = 24 months).",
         style={"fontSize": "0.75rem", "color": C["muted"]},
     ),
+    _METRIC_GLOSSARY,
 ])
 
-_dec26 = {
-    "bear": DF_FC_BEAR.iloc[-1],
-    "base": DF_FC_BASE.iloc[-1],
-    "bull": DF_FC_BULL.iloc[-1],
-}
-
-_scenario_targets_div = html.Div([
-    *[
+def _build_fc_targets_div(year: int, fc_bear=None, fc_base=None, fc_bull=None) -> html.Div:
+    """Scenario targets card for the mid-market composite forecast tab."""
+    if fc_bear is None:
+        fc_bear, fc_base, fc_bull = DF_FC_BEAR, DF_FC_BASE, DF_FC_BULL
+    decs = {"bear": _fc_dec(fc_bear, year),
+            "base": _fc_dec(fc_base, year),
+            "bull": _fc_dec(fc_bull, year)}
+    rows = [
         html.Div([
             html.Span("● ", style={"color": SCENARIO_STYLES[n][0], "fontSize": "1rem"}),
             html.Span(f"{SCENARIO_STYLES[n][2]}: ",
                       style={"color": C["muted"], "fontSize": "0.8rem"}),
-            html.Span(f"{_dec26[n]['yhat']:.1f}",
+            html.Span(f"{decs[n]['yhat']:.1f}",
                       style={"color": SCENARIO_STYLES[n][0],
                              "fontWeight": "700", "fontSize": "0.9rem"}),
-            html.Span(f"  [{_dec26[n]['yhat_lower']:.1f} – {_dec26[n]['yhat_upper']:.1f}]",
+            html.Span(f"  [{decs[n]['yhat_lower']:.1f} – {decs[n]['yhat_upper']:.1f}]",
                       style={"color": C["muted"], "fontSize": "0.78rem"}),
         ], className="mb-2")
         for n in ["bear", "base", "bull"]
-    ],
-    html.Hr(style={"borderColor": C["border"], "margin": "8px 0"}),
-    html.Div(
-        "Dec 2026 AHPI targets under each scenario. 90% credible interval in brackets.",
-        style={"fontSize": "0.75rem", "color": C["muted"]},
-    ),
-])
+    ]
+    return html.Div([
+        *rows,
+        html.Hr(style={"borderColor": C["border"], "margin": "8px 0"}),
+        html.Div(f"Dec {year} AHPI under each scenario. 90% credible interval in brackets.",
+                 style={"fontSize": "0.75rem", "color": C["muted"]}),
+    ])
 
 tab_forecast = html.Div([
     section_card(
@@ -1925,16 +2625,27 @@ tab_forecast = html.Div([
                 html.Label("90% Confidence Intervals",
                            style={"fontSize": "0.78rem", "color": C["muted"]}),
                 dbc.Switch(id="forecast-ci", value=True, label=""),
-            ], md=3, className="d-flex flex-column justify-content-start"),
+            ], md=2, className="d-flex flex-column justify-content-start"),
+            dbc.Col([
+                html.Label("Target year",
+                           style={"fontSize": "0.78rem", "color": C["muted"]}),
+                dcc.Dropdown(
+                    id="forecast-year", options=FC_YEAR_OPTS, value=2026,
+                    clearable=False,
+                    style={"backgroundColor": C["bg"], "color": C["text"],
+                           "fontSize": "0.82rem"},
+                ),
+            ], md=2),
             dbc.Col([
                 html.Div(
-                    "Prophet mid-market model trained on 180 months (Jan 2010 – Dec 2024) "
-                    "with 6 macro regressors. "
-                    "Test accuracy uses an evaluation model trained on 2010–2022 only.",
+                    "Prophet mid-market composite model · 180 months · 6 macro regressors. "
+                    "Forecasts extend to Dec 2029 across Bear / Base / Bull scenarios.",
                     style={"fontSize": "0.75rem", "color": C["muted"], "paddingTop": "8px"},
                 ),
-            ], md=9),
+            ], md=8),
         ], className="mb-2"),
+        _dl_btn("dl-forecast-btn", "⬇  Download ZIP"),
+        dcc.Download(id="dl-forecast"),
         dcc.Graph(
             id="forecast-chart",
             config={
@@ -1955,10 +2666,10 @@ tab_forecast = html.Div([
         ),
         dbc.Col(
             section_card(
-                html.P("Dec 2026 AHPI targets by scenario",
+                html.P(id="forecast-targets-heading",
                        style={"color": C["muted"], "fontSize": "0.78rem",
                               "fontWeight": "600", "marginBottom": "10px"}),
-                _scenario_targets_div,
+                html.Div(id="forecast-targets"),
             ), md=8,
         ),
     ]),
@@ -1986,16 +2697,28 @@ tab_prime_forecast = html.Div([
                 html.Label("90% Confidence Intervals",
                            style={"fontSize": "0.78rem", "color": C["muted"]}),
                 dbc.Switch(id="prime-fc-ci", value=True, label=""),
-            ], md=3, className="d-flex flex-column justify-content-start"),
+            ], md=2, className="d-flex flex-column justify-content-start"),
+            dbc.Col([
+                html.Label("Target year",
+                           style={"fontSize": "0.78rem", "color": C["muted"]}),
+                dcc.Dropdown(
+                    id="prime-fc-year", options=FC_YEAR_OPTS, value=2026,
+                    clearable=False,
+                    style={"backgroundColor": C["bg"], "color": C["text"],
+                           "fontSize": "0.82rem"},
+                ),
+            ], md=2),
             dbc.Col([
                 html.Div(
                     "One Prophet model per prime area (6 models). "
                     "USD-indexed markets: exchange rate is the dominant regressor. "
-                    "Bear/Base/Bull assume GHS/USD → 20 / 15 / 12 by end-2026.",
+                    "Forecasts extend to Dec 2029.",
                     style={"fontSize": "0.75rem", "color": C["muted"], "paddingTop": "8px"},
                 ),
-            ], md=4),
+            ], md=3),
         ], className="mb-2"),
+        _dl_btn("dl-prime-forecast-btn", "⬇  Download ZIP"),
+        dcc.Download(id="dl-prime-forecast"),
         dcc.Graph(
             id="prime-forecast-chart",
             config={
@@ -2016,7 +2739,7 @@ tab_prime_forecast = html.Div([
         ),
         dbc.Col(
             section_card(
-                html.P("Dec 2026 AHPI targets by scenario",
+                html.P(id="prime-fc-targets-heading",
                        style={"color": C["muted"], "fontSize": "0.78rem",
                               "fontWeight": "600", "marginBottom": "10px"}),
                 html.Div(id="prime-fc-targets"),
@@ -2047,16 +2770,28 @@ tab_district_forecast = html.Div([
                 html.Label("90% Confidence Intervals",
                            style={"fontSize": "0.78rem", "color": C["muted"]}),
                 dbc.Switch(id="district-fc-ci", value=True, label=""),
-            ], md=3, className="d-flex flex-column justify-content-start"),
+            ], md=2, className="d-flex flex-column justify-content-start"),
+            dbc.Col([
+                html.Label("Target year",
+                           style={"fontSize": "0.78rem", "color": C["muted"]}),
+                dcc.Dropdown(
+                    id="district-fc-year", options=FC_YEAR_OPTS, value=2026,
+                    clearable=False,
+                    style={"backgroundColor": C["bg"], "color": C["text"],
+                           "fontSize": "0.82rem"},
+                ),
+            ], md=2),
             dbc.Col([
                 html.Div(
                     "One Prophet model per mid-market district (5 models). "
-                    "GHS-denominated markets; exchange rate and CPI are the primary regressors. "
-                    "Bear/Base/Bull assume GHS/USD → 20 / 15 / 12 by end-2026.",
+                    "GHS-denominated; exchange rate and CPI are the primary regressors. "
+                    "Forecasts extend to Dec 2029.",
                     style={"fontSize": "0.75rem", "color": C["muted"], "paddingTop": "8px"},
                 ),
-            ], md=4),
+            ], md=3),
         ], className="mb-2"),
+        _dl_btn("dl-district-forecast-btn", "⬇  Download ZIP"),
+        dcc.Download(id="dl-district-forecast"),
         dcc.Graph(
             id="district-forecast-chart",
             config={
@@ -2077,7 +2812,7 @@ tab_district_forecast = html.Div([
         ),
         dbc.Col(
             section_card(
-                html.P("Dec 2026 AHPI targets by scenario",
+                html.P(id="district-fc-targets-heading",
                        style={"color": C["muted"], "fontSize": "0.78rem",
                               "fontWeight": "600", "marginBottom": "10px"}),
                 html.Div(id="district-fc-targets"),
@@ -2085,6 +2820,650 @@ tab_district_forecast = html.Div([
         ),
     ]),
 ])
+
+# ── Phase 2: pre-computed historical December snapshots ───────────────────────
+# Each dict: { year: pd.Series (row from the dataset at Dec of that year) }
+
+_HIST_DEC_COMPOSITE: dict[int, pd.Series] = {
+    int(row["ds"].year): row
+    for _, row in DF[DF["ds"].dt.month == 12].iterrows()
+}
+_HIST_DEC_DISTRICT: dict[str, dict[int, pd.Series]] = {
+    d: {int(row["ds"].year): row
+        for _, row in grp[grp["ds"].dt.month == 12].iterrows()}
+    for d, grp in DF_DISTRICT.groupby("district")
+}
+_HIST_DEC_PRIME: dict[str, dict[int, pd.Series]] = {
+    a: {int(row["ds"].year): row
+        for _, row in grp[grp["ds"].dt.month == 12].iterrows()}
+    for a, grp in DF_PRIME.groupby("district")
+}
+
+# Median monthly household income proxy (GHS, 2024 estimate) for affordability
+GHANA_MEDIAN_INCOME_GHS = 4_000
+
+# Market label → lookup key (used by both calculator tabs)
+_MARKET_OPTS = (
+    [{"label": "⬛  Composite Mid-Market", "value": "composite"}] +
+    [{"label": f"🔷  {d}", "value": d} for d in DISTRICTS] +
+    [{"label": f"🔶  {a}", "value": a} for a in PRIME_AREAS]
+)
+
+def _get_hist_dec(market: str, year: int) -> pd.Series | None:
+    if market == "composite":
+        return _HIST_DEC_COMPOSITE.get(year)
+    if market in DISTRICTS:
+        return _HIST_DEC_DISTRICT.get(market, {}).get(year)
+    return _HIST_DEC_PRIME.get(market, {}).get(year)
+
+def _get_fc_dec(market: str, scenario: str, year: int) -> pd.Series | None:
+    if market == "composite":
+        df_fc = {"bear": DF_FC_BEAR, "base": DF_FC_BASE, "bull": DF_FC_BULL}[scenario]
+    elif market in DISTRICTS:
+        df_fc = _DISTRICT_FC.get((scenario, market))
+    else:
+        df_fc = _PRIME_FC.get((scenario, market))
+    return None if df_fc is None else _fc_dec(df_fc, year)
+
+def _result_card(label: str, value: str, sub: str = "", color: str = C["gold"]) -> html.Div:
+    return html.Div([
+        html.Div(label, style={"fontSize": "0.7rem", "color": C["muted"],
+                                "textTransform": "uppercase", "letterSpacing": "0.06em"}),
+        html.Div(value, style={"fontSize": "1.1rem", "fontWeight": "700", "color": color}),
+        html.Div(sub,   style={"fontSize": "0.72rem", "color": C["muted"]}),
+    ], style={"backgroundColor": C["hover"], "padding": "10px 14px", "borderRadius": "6px",
+              "border": f"1px solid {C['border']}", "marginBottom": "8px"})
+
+def _scenario_col(sc: str, label: str, color: str, content: list) -> dbc.Col:
+    return dbc.Col(html.Div([
+        html.Div(label, style={"fontWeight": "700", "color": color,
+                               "fontSize": "0.85rem", "marginBottom": "8px",
+                               "borderBottom": f"2px solid {color}", "paddingBottom": "4px"}),
+        *content,
+    ], style={"backgroundColor": C["card"], "padding": "12px", "borderRadius": "6px",
+              "border": f"1px solid {color}33"}))
+
+# ── PDF report generation ─────────────────────────────────────────────────────
+
+_PDF_BG       = rl_colors.HexColor("#0d1117")
+_PDF_CARD     = rl_colors.HexColor("#161b22")
+_PDF_GOLD     = rl_colors.HexColor("#d4a017")
+_PDF_TEXT     = rl_colors.HexColor("#e6edf3")
+_PDF_MUTED    = rl_colors.HexColor("#8b949e")
+_PDF_GREEN    = rl_colors.HexColor("#3fb950")
+_PDF_RED      = rl_colors.HexColor("#f85149")
+_PDF_BLUE     = rl_colors.HexColor("#58a6ff")
+_PDF_BORDER   = rl_colors.HexColor("#30363d")
+
+
+def _chart_png(market: str, width_px: int = 900, height_px: int = 360) -> bytes | None:
+    """Render the forecast figure for *market* as a PNG byte string."""
+    try:
+        if market == "composite":
+            fig = build_forecast_fig(show_ci=True)
+        elif market in DISTRICTS:
+            fig = build_district_forecast_fig(market, show_ci=True)
+        else:
+            fig = build_prime_forecast_fig(market, show_ci=True)
+        fig.update_layout(
+            paper_bgcolor="#161b22",
+            plot_bgcolor="#0d1117",
+            width=width_px, height=height_px,
+            margin=dict(l=40, r=20, t=30, b=40),
+        )
+        return pio.to_image(fig, format="png", engine="kaleido")
+    except Exception:
+        return None
+
+
+def _pdf_styles():
+    base = getSampleStyleSheet()
+    styles = {
+        "title": ParagraphStyle("title", fontName="Helvetica-Bold", fontSize=18,
+                                textColor=_PDF_GOLD, alignment=TA_LEFT, spaceAfter=4),
+        "subtitle": ParagraphStyle("subtitle", fontName="Helvetica", fontSize=10,
+                                   textColor=_PDF_MUTED, alignment=TA_LEFT, spaceAfter=10),
+        "section": ParagraphStyle("section", fontName="Helvetica-Bold", fontSize=11,
+                                  textColor=_PDF_GOLD, alignment=TA_LEFT,
+                                  spaceBefore=10, spaceAfter=4),
+        "body": ParagraphStyle("body", fontName="Helvetica", fontSize=8.5,
+                               textColor=_PDF_TEXT, alignment=TA_LEFT, spaceAfter=3),
+        "small": ParagraphStyle("small", fontName="Helvetica", fontSize=7.5,
+                                textColor=_PDF_MUTED, alignment=TA_LEFT),
+        "cell": ParagraphStyle("cell", fontName="Helvetica", fontSize=8,
+                               textColor=_PDF_TEXT),
+        "cell_bold": ParagraphStyle("cell_bold", fontName="Helvetica-Bold", fontSize=8,
+                                    textColor=_PDF_GOLD),
+        "right": ParagraphStyle("right", fontName="Helvetica", fontSize=8,
+                                textColor=_PDF_TEXT, alignment=TA_RIGHT),
+        "disclaimer": ParagraphStyle("disclaimer", fontName="Helvetica-Oblique", fontSize=7,
+                                     textColor=_PDF_MUTED, alignment=TA_CENTER, spaceAfter=4),
+    }
+    return styles
+
+
+def generate_market_pdf(market: str, report_year: int) -> bytes:
+    """Generate a 2-3 page PDF market report for the given market and forecast year."""
+    buf = io.BytesIO()
+    W, H = A4
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=18*mm, rightMargin=18*mm,
+        topMargin=16*mm, bottomMargin=16*mm,
+    )
+
+    styles = _pdf_styles()
+    story  = []
+
+    # Determine display label
+    if market == "composite":
+        label = "Composite Mid-Market"
+        family = "mid-market"
+    elif market in DISTRICTS:
+        label = market
+        family = "mid-market district"
+    else:
+        label = market
+        family = "prime area"
+
+    # ── Header ──────────────────────────────────────────────────────────────────
+    story.append(Paragraph("ACCRA HOME PRICE INDEX", styles["title"]))
+    story.append(Paragraph(
+        f"Market Report — {label} ({family.title()}) · Forecast Horizon: Dec {report_year}",
+        styles["subtitle"]))
+    story.append(Paragraph(
+        f"Generated: {datetime.date.today().strftime('%d %B %Y')}  ·  "
+        "Source: AHPI Prophet v2.1  ·  Base year: 2015 = 100",
+        styles["small"]))
+    story.append(HRFlowable(width="100%", thickness=0.5,
+                            color=_PDF_GOLD, spaceAfter=8))
+
+    # ── Current snapshot (latest historical Dec) ─────────────────────────────
+    story.append(Paragraph("Current Market Snapshot (Dec 2024)", styles["section"]))
+
+    hist_2024 = _get_hist_dec(market, 2024)
+    hist_2023 = _get_hist_dec(market, 2023)
+
+    if hist_2024 is not None:
+        ahpi_now  = float(hist_2024.get("y", "—"))
+        ghs_sqm   = hist_2024.get("price_ghs_per_sqm")
+        usd_sqm   = hist_2024.get("price_usd_per_sqm")
+        if hist_2023 is not None:
+            ahpi_prev = float(hist_2023.get("y", ahpi_now))
+            yoy_pct   = (ahpi_now - ahpi_prev) / ahpi_prev * 100 if ahpi_prev else 0
+            yoy_str   = f"{yoy_pct:+.1f}% YoY"
+        else:
+            yoy_str = "—"
+
+        snap_data = [
+            [Paragraph("Metric", styles["cell_bold"]),
+             Paragraph("Value", styles["cell_bold"]),
+             Paragraph("Note", styles["cell_bold"])],
+            [Paragraph("AHPI (Dec 2024)", styles["cell"]),
+             Paragraph(f"{ahpi_now:.1f}", styles["cell"]),
+             Paragraph(yoy_str, styles["cell"])],
+        ]
+        if ghs_sqm is not None:
+            snap_data.append([
+                Paragraph("GHS / sqm", styles["cell"]),
+                Paragraph(f"GHS {float(ghs_sqm):,.0f}", styles["cell"]),
+                Paragraph("", styles["cell"]),
+            ])
+        if usd_sqm is not None:
+            snap_data.append([
+                Paragraph("USD / sqm", styles["cell"]),
+                Paragraph(f"USD {float(usd_sqm):,.0f}", styles["cell"]),
+                Paragraph("At 2024 GHS/USD rate", styles["cell"]),
+            ])
+
+        col_w = [(W - 36*mm) * f for f in (0.45, 0.25, 0.30)]
+        snap_tbl = Table(snap_data, colWidths=col_w, repeatRows=1)
+        snap_tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), _PDF_GOLD),
+            ("TEXTCOLOR",  (0, 0), (-1, 0), _PDF_BG),
+            ("BACKGROUND", (0, 1), (-1, -1), _PDF_CARD),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [_PDF_CARD, _PDF_BG]),
+            ("GRID",       (0, 0), (-1, -1), 0.3, _PDF_BORDER),
+            ("TOPPADDING",  (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ]))
+        story.append(snap_tbl)
+        story.append(Spacer(1, 8))
+    else:
+        story.append(Paragraph("No historical data available for Dec 2024.", styles["body"]))
+
+    # ── Scenario Forecast Table ──────────────────────────────────────────────
+    story.append(Paragraph(f"Scenario Forecasts — Dec {report_year}", styles["section"]))
+    story.append(Paragraph(
+        "Three economic scenarios modelled with Facebook Prophet. "
+        "Bear assumes continued GHS/USD depreciation (→ 20). "
+        "Base assumes gradual stabilisation (→ 15). "
+        "Bull assumes cedi recovery (→ 12). 90% credible interval shown.",
+        styles["small"]))
+    story.append(Spacer(1, 4))
+
+    fc_rows = [
+        [Paragraph("Scenario", styles["cell_bold"]),
+         Paragraph(f"Dec {report_year} AHPI", styles["cell_bold"]),
+         Paragraph("Lower (90%)", styles["cell_bold"]),
+         Paragraph("Upper (90%)", styles["cell_bold"]),
+         Paragraph("GHS/USD Assumption", styles["cell_bold"])],
+    ]
+    sc_label_map = {"bear": "Bear", "base": "Base", "bull": "Bull"}
+    sc_color_map = {"bear": _PDF_RED, "base": _PDF_BLUE, "bull": _PDF_GREEN}
+    for sc in ("bear", "base", "bull"):
+        fc_row = _get_fc_dec(market, sc, report_year)
+        if fc_row is not None:
+            fc_rows.append([
+                Paragraph(sc_label_map[sc], styles["cell"]),
+                Paragraph(f"{float(fc_row['yhat']):.1f}", styles["cell"]),
+                Paragraph(f"{float(fc_row['yhat_lower']):.1f}", styles["cell"]),
+                Paragraph(f"{float(fc_row['yhat_upper']):.1f}", styles["cell"]),
+                Paragraph(f"{SCENARIO_FX[sc]:.1f}", styles["cell"]),
+            ])
+        else:
+            fc_rows.append([Paragraph(sc_label_map[sc], styles["cell"])] + [Paragraph("—", styles["cell"])] * 4)
+
+    fc_col_w = [(W - 36*mm) * f for f in (0.18, 0.20, 0.20, 0.20, 0.22)]
+    fc_tbl = Table(fc_rows, colWidths=fc_col_w, repeatRows=1)
+    fc_style = [
+        ("BACKGROUND", (0, 0), (-1, 0), _PDF_GOLD),
+        ("TEXTCOLOR",  (0, 0), (-1, 0), _PDF_BG),
+        ("GRID",       (0, 0), (-1, -1), 0.3, _PDF_BORDER),
+        ("TOPPADDING",  (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+    ]
+    for i, sc in enumerate(("bear", "base", "bull"), start=1):
+        fc_style.append(("BACKGROUND", (0, i), (0, i), sc_color_map[sc]))
+        fc_style.append(("TEXTCOLOR",  (0, i), (0, i), _PDF_BG))
+        row_bg = _PDF_CARD if i % 2 == 1 else _PDF_BG
+        fc_style.append(("BACKGROUND", (1, i), (-1, i), row_bg))
+    fc_tbl.setStyle(TableStyle(fc_style))
+    story.append(fc_tbl)
+    story.append(Spacer(1, 8))
+
+    # ── Model accuracy metrics ───────────────────────────────────────────────
+    story.append(Paragraph("Model Accuracy (2023–2024 Test Set)", styles["section"]))
+
+    if market == "composite":
+        mae  = _TEST_MAE
+        rmse = _TEST_RMSE
+        mape = _TEST_MAPE
+    elif market in DISTRICTS and market in _DISTRICT_TEST_EVALS:
+        te   = _DISTRICT_TEST_EVALS[market]
+        mae  = (te["y"] - te["yhat"]).abs().mean()
+        rmse = ((te["y"] - te["yhat"]) ** 2).mean() ** 0.5
+        mape = ((te["y"] - te["yhat"]).abs() / te["y"]).mean() * 100
+    elif market in _PRIME_TEST_EVALS:
+        te   = _PRIME_TEST_EVALS[market]
+        mae  = (te["y"] - te["yhat"]).abs().mean()
+        rmse = ((te["y"] - te["yhat"]) ** 2).mean() ** 0.5
+        mape = ((te["y"] - te["yhat"]).abs() / te["y"]).mean() * 100
+    else:
+        mae = rmse = mape = None
+
+    if mae is not None:
+        acc_data = [
+            [Paragraph("MAE", styles["cell_bold"]),
+             Paragraph("RMSE", styles["cell_bold"]),
+             Paragraph("MAPE", styles["cell_bold"])],
+            [Paragraph(f"{mae:.2f} pts", styles["cell"]),
+             Paragraph(f"{rmse:.2f} pts", styles["cell"]),
+             Paragraph(f"{mape:.1f}%", styles["cell"])],
+        ]
+        acc_col_w = [(W - 36*mm) / 3] * 3
+        acc_tbl = Table(acc_data, colWidths=acc_col_w, repeatRows=1)
+        acc_tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), _PDF_GOLD),
+            ("TEXTCOLOR",  (0, 0), (-1, 0), _PDF_BG),
+            ("BACKGROUND", (0, 1), (-1, -1), _PDF_CARD),
+            ("GRID",       (0, 0), (-1, -1), 0.3, _PDF_BORDER),
+            ("TOPPADDING",  (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("ALIGN",      (0, 0), (-1, -1), "CENTER"),
+        ]))
+        story.append(acc_tbl)
+    else:
+        story.append(Paragraph("Accuracy metrics unavailable.", styles["body"]))
+
+    story.append(Spacer(1, 10))
+
+    # ── Forecast chart ───────────────────────────────────────────────────────
+    story.append(Paragraph("Historical AHPI & Scenario Forecasts", styles["section"]))
+
+    png_bytes = _chart_png(market)
+    if png_bytes:
+        img_buf = io.BytesIO(png_bytes)
+        chart_w = W - 36*mm
+        chart_h = chart_w * 360 / 900
+        story.append(RLImage(img_buf, width=chart_w, height=chart_h))
+    else:
+        story.append(Paragraph("Chart unavailable (kaleido not configured).", styles["small"]))
+
+    story.append(Spacer(1, 10))
+
+    # ── Disclaimer ───────────────────────────────────────────────────────────
+    story.append(HRFlowable(width="100%", thickness=0.4, color=_PDF_BORDER, spaceAfter=4))
+    story.append(Paragraph(
+        "This report is generated from the Accra Home Price Index (AHPI) model for informational purposes only. "
+        "Forecasts are probabilistic outputs of a Facebook Prophet model trained on historical data. "
+        "They do not constitute financial, investment, or legal advice. "
+        "Past performance does not guarantee future results. "
+        "Always conduct independent due diligence before making property investment decisions.",
+        styles["disclaimer"],
+    ))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+# ── tab: Market Report (Phase 3.1) ────────────────────────────────────────────
+
+_REPORT_YEAR_OPTS = [{"label": str(y), "value": y} for y in FC_YEARS]
+
+tab_report = html.Div([
+    section_card(
+        html.P(
+            "Generate a downloadable PDF market report for any district or prime area. "
+            "Each report includes a current snapshot, scenario forecast table, model accuracy metrics, and a chart.",
+            style={"color": C["muted"], "fontSize": "0.8rem", "marginBottom": "14px"},
+        ),
+        dbc.Row([
+            dbc.Col([
+                html.Div("Market / area", style={"fontSize": "0.75rem", "color": C["muted"],
+                                                  "marginBottom": "3px"}),
+                dcc.Dropdown(id="report-market", options=_MARKET_OPTS, value="composite",
+                             clearable=False,
+                             style={"backgroundColor": C["bg"], "color": C["text"],
+                                    "fontSize": "0.82rem", "marginBottom": "10px"}),
+                html.Div("Forecast target year", style={"fontSize": "0.75rem",
+                                                         "color": C["muted"], "marginBottom": "3px"}),
+                dcc.Dropdown(id="report-year", options=_REPORT_YEAR_OPTS, value=2027,
+                             clearable=False,
+                             style={"backgroundColor": C["bg"], "fontSize": "0.82rem",
+                                    "marginBottom": "16px"}),
+                dbc.Button(
+                    "Generate & Download PDF Report",
+                    id="report-pdf-btn", color="warning", outline=True, size="sm",
+                    style={"fontWeight": "600", "fontSize": "0.82rem", "width": "100%"},
+                ),
+                dcc.Download(id="report-pdf-dl"),
+            ], md=4),
+            dbc.Col([
+                html.Div(id="report-preview", style={"color": C["muted"],
+                                                      "fontSize": "0.8rem", "lineHeight": "1.7"}),
+            ], md=8),
+        ], className="g-3"),
+    )
+], style={"padding": "4px"})
+
+
+# ── tab: Market Snapshot Card (Phase 3.2) ─────────────────────────────────────
+
+tab_snapshot = html.Div([
+    section_card(
+        html.P(
+            "A single-page market briefing card — key numbers at a glance, optimised for sharing or printing.",
+            style={"color": C["muted"], "fontSize": "0.8rem", "marginBottom": "14px"},
+        ),
+        dbc.Row([
+            dbc.Col([
+                html.Div("Market / area", style={"fontSize": "0.75rem", "color": C["muted"],
+                                                  "marginBottom": "3px"}),
+                dcc.Dropdown(id="snap-market", options=_MARKET_OPTS, value="composite",
+                             clearable=False,
+                             style={"backgroundColor": C["bg"], "color": C["text"],
+                                    "fontSize": "0.82rem", "marginBottom": "10px"}),
+                html.Div("Forecast target year", style={"fontSize": "0.75rem",
+                                                         "color": C["muted"], "marginBottom": "3px"}),
+                dcc.Dropdown(id="snap-year", options=_REPORT_YEAR_OPTS, value=2027,
+                             clearable=False,
+                             style={"backgroundColor": C["bg"], "fontSize": "0.82rem",
+                                    "marginBottom": "16px"}),
+            ], md=3),
+            dbc.Col([
+                html.Div(id="snap-card-container"),
+            ], md=9),
+        ], className="g-3"),
+    )
+], style={"padding": "4px"})
+
+
+# ── tab: Investment Return Calculator ─────────────────────────────────────────
+_INV_BUY_OPTS = [{"label": str(y), "value": y} for y in range(2010, 2025)]
+_INV_SELL_OPTS = FC_YEAR_OPTS
+
+tab_invest = html.Div([
+    section_card(
+        html.P(
+            "Estimate the return on a residential property investment in Accra under each scenario. "
+            "Historical prices are taken from the AHPI dataset; future values are Prophet model forecasts.",
+            style={"color": C["muted"], "fontSize": "0.8rem", "marginBottom": "14px"},
+        ),
+        dbc.Row([
+            # ── inputs ──────────────────────────────────────────────────────
+            dbc.Col([
+                html.Div("Market / area", style={"fontSize": "0.75rem", "color": C["muted"],
+                                                  "marginBottom": "3px"}),
+                dcc.Dropdown(id="inv-market", options=_MARKET_OPTS, value="composite",
+                             clearable=False,
+                             style={"backgroundColor": C["bg"], "color": C["text"],
+                                    "fontSize": "0.82rem", "marginBottom": "10px"}),
+
+                dbc.Row([
+                    dbc.Col([
+                        html.Div("Buy year", style={"fontSize": "0.75rem", "color": C["muted"],
+                                                     "marginBottom": "3px"}),
+                        dcc.Dropdown(id="inv-buy-year", options=_INV_BUY_OPTS, value=2020,
+                                     clearable=False,
+                                     style={"backgroundColor": C["bg"], "fontSize": "0.82rem"}),
+                    ], md=6),
+                    dbc.Col([
+                        html.Div("Sell year", style={"fontSize": "0.75rem", "color": C["muted"],
+                                                      "marginBottom": "3px"}),
+                        dcc.Dropdown(id="inv-sell-year", options=_INV_SELL_OPTS, value=2027,
+                                     clearable=False,
+                                     style={"backgroundColor": C["bg"], "fontSize": "0.82rem"}),
+                    ], md=6),
+                ], className="mb-2"),
+
+                html.Div("Property size (sqm)", style={"fontSize": "0.75rem",
+                                                         "color": C["muted"], "marginBottom": "3px"}),
+                dcc.Input(id="inv-sqm", type="number", value=100, min=10, max=10000, step=10,
+                          debounce=True,
+                          style={"backgroundColor": C["bg"], "color": C["text"],
+                                 "border": f"1px solid {C['border']}", "borderRadius": "4px",
+                                 "padding": "5px 10px", "width": "100%",
+                                 "fontSize": "0.85rem", "marginBottom": "16px"}),
+
+                html.Hr(style={"borderColor": C["border"]}),
+                html.Div([
+                    html.Div("Buy price (GHS/sqm)", style={"fontSize": "0.72rem",
+                                                             "color": C["muted"]}),
+                    html.Div(id="inv-buy-price-display",
+                             style={"fontWeight": "600", "color": C["gold"],
+                                    "fontSize": "0.9rem"}),
+                ], className="mb-2"),
+                html.Div([
+                    html.Div("Buy price (USD/sqm)", style={"fontSize": "0.72rem",
+                                                             "color": C["muted"]}),
+                    html.Div(id="inv-buy-usd-display",
+                             style={"fontWeight": "600", "color": C["blue"],
+                                    "fontSize": "0.9rem"}),
+                ], className="mb-2"),
+                html.Div([
+                    html.Div("GHS/USD at purchase", style={"fontSize": "0.72rem",
+                                                             "color": C["muted"]}),
+                    html.Div(id="inv-buy-fx-display",
+                             style={"fontWeight": "600", "color": C["muted"],
+                                    "fontSize": "0.9rem"}),
+                ]),
+            ], md=3, style={"borderRight": f"1px solid {C['border']}", "paddingRight": "16px"}),
+
+            # ── results ─────────────────────────────────────────────────────
+            dbc.Col([
+                html.Div(id="inv-results"),
+            ], md=9),
+        ]),
+    ),
+])
+
+# ── tab: Mortgage Stress Test ─────────────────────────────────────────────────
+tab_mortgage = html.Div([
+    section_card(
+        html.P(
+            "Estimate monthly repayments and stress-test collateral values against each "
+            "scenario. Mid-market districts only (GHS-denominated mortgages).",
+            style={"color": C["muted"], "fontSize": "0.8rem", "marginBottom": "14px"},
+        ),
+        dbc.Row([
+            # ── inputs ──────────────────────────────────────────────────────
+            dbc.Col([
+                html.Div("District", style={"fontSize": "0.75rem", "color": C["muted"],
+                                             "marginBottom": "3px"}),
+                dcc.Dropdown(
+                    id="mort-district",
+                    options=[{"label": d, "value": d} for d in DISTRICTS],
+                    value=DISTRICTS[0], clearable=False,
+                    style={"backgroundColor": C["bg"], "color": C["text"],
+                           "fontSize": "0.82rem", "marginBottom": "10px"},
+                ),
+
+                html.Div("Property size (sqm)", style={"fontSize": "0.75rem",
+                                                         "color": C["muted"], "marginBottom": "3px"}),
+                dcc.Input(id="mort-sqm", type="number", value=100, min=10, max=5000, step=10,
+                          debounce=True,
+                          style={"backgroundColor": C["bg"], "color": C["text"],
+                                 "border": f"1px solid {C['border']}", "borderRadius": "4px",
+                                 "padding": "5px 10px", "width": "100%",
+                                 "fontSize": "0.85rem", "marginBottom": "10px"}),
+
+                html.Div("Property value (GHS) — auto-filled, editable",
+                         style={"fontSize": "0.75rem", "color": C["muted"], "marginBottom": "3px"}),
+                dcc.Input(id="mort-value", type="number", min=1000, step=1000, debounce=True,
+                          style={"backgroundColor": C["bg"], "color": C["text"],
+                                 "border": f"1px solid {C['border']}", "borderRadius": "4px",
+                                 "padding": "5px 10px", "width": "100%",
+                                 "fontSize": "0.85rem", "marginBottom": "10px"}),
+
+                html.Div("Loan-to-value (%)",
+                         style={"fontSize": "0.75rem", "color": C["muted"], "marginBottom": "3px"}),
+                dcc.Slider(id="mort-ltv", min=50, max=80, step=5, value=70,
+                           marks={v: {"label": f"{v}%", "style": {"color": C["muted"],
+                                                                    "fontSize": "0.7rem"}}
+                                  for v in range(50, 85, 5)},
+                           tooltip={"always_visible": False}),
+
+                html.Div("Loan term (years)",
+                         style={"fontSize": "0.75rem", "color": C["muted"],
+                                "marginBottom": "3px", "marginTop": "10px"}),
+                dcc.Dropdown(
+                    id="mort-term",
+                    options=[{"label": f"{y} years", "value": y} for y in [10, 15, 20, 25]],
+                    value=20, clearable=False,
+                    style={"backgroundColor": C["bg"], "fontSize": "0.82rem",
+                           "marginBottom": "10px"},
+                ),
+
+                html.Div("Annual interest rate (%)",
+                         style={"fontSize": "0.75rem", "color": C["muted"], "marginBottom": "3px"}),
+                dcc.Input(id="mort-rate", type="number", value=28.0, min=1, max=60,
+                          step=0.5, debounce=True,
+                          style={"backgroundColor": C["bg"], "color": C["text"],
+                                 "border": f"1px solid {C['border']}", "borderRadius": "4px",
+                                 "padding": "5px 10px", "width": "100%",
+                                 "fontSize": "0.85rem", "marginBottom": "10px"}),
+
+                html.Div("Collateral check year",
+                         style={"fontSize": "0.75rem", "color": C["muted"], "marginBottom": "3px"}),
+                dcc.Dropdown(
+                    id="mort-year", options=FC_YEAR_OPTS, value=2027, clearable=False,
+                    style={"backgroundColor": C["bg"], "fontSize": "0.82rem"},
+                ),
+            ], md=3, style={"borderRight": f"1px solid {C['border']}", "paddingRight": "16px"}),
+
+            # ── results ─────────────────────────────────────────────────────
+            dbc.Col([
+                html.Div(id="mort-results"),
+            ], md=9),
+        ]),
+    ),
+])
+
+# ── stakeholder role configuration ────────────────────────────────────────────
+# Each role maps to a landing-page card, a default dashboard tab, 3 headline KPIs,
+# and up to 4 quick-jump tab shortcuts shown in the in-dashboard role banner.
+ROLES: dict[str, dict] = {
+    "diaspora": {
+        "label":      "Diaspora Investor",
+        "icon":       "💼",
+        "tagline":    "Track USD returns across prime Accra neighbourhoods",
+        "detail":     "Prime areas delivered +232% USD returns over 14 years — a category apart from mid-market's +34%.",
+        "tab":        "tab-prime",
+        "accent":     C["gold"],
+        "kpis":       [("Prime USD/sqm", "USD 2,874"), ("East Legon gain", "+270% USD"), ("vs Mid-Market", "+232% vs +34%")],
+        "quick_tabs": [("Prime Areas", "tab-prime"), ("Prime Forecast", "tab-prime-forecast"),
+                       ("Invest. Calc", "tab-invest"), ("Map", "tab-map")],
+    },
+    "lender": {
+        "label":      "Mortgage Lender",
+        "icon":       "🏦",
+        "tagline":    "Monitor collateral values and LTV risk across districts",
+        "detail":     "Mid-market AHPI +1,303% GHS but only +34% USD — stress-test your book against FX scenarios.",
+        "tab":        "tab-mortgage",
+        "accent":     C["blue"],
+        "kpis":       [("AHPI Dec 2024", "419.7"), ("Lending rate", "~27%"), ("FX–AHPI corr.", "0.991")],
+        "quick_tabs": [("Mortgage Stress", "tab-mortgage"), ("Districts", "tab-districts"),
+                       ("Dist. Forecast", "tab-district-forecast"), ("Overview", "tab-overview")],
+    },
+    "developer": {
+        "label":      "Real Estate Developer",
+        "icon":       "🏗",
+        "tagline":    "Find the districts with the strongest margin and growth",
+        "detail":     "Kasoa: lowest GHS/sqm (10,156) + fastest USD gain (+88%). Prime margins are 2.9× mid-market.",
+        "tab":        "tab-districts",
+        "accent":     C["orange"],
+        "kpis":       [("Kasoa USD gain", "+88%"), ("Spintex USD/sqm", "USD 1,374"), ("Prime/Mid ratio", "2.9×")],
+        "quick_tabs": [("Districts", "tab-districts"), ("Map", "tab-map"),
+                       ("Prime Areas", "tab-prime"), ("Dist. Forecast", "tab-district-forecast")],
+    },
+    "institutional": {
+        "label":      "Institutional Investor",
+        "icon":       "📊",
+        "tagline":    "Model Bear / Base / Bull return scenarios across 11 areas",
+        "detail":     "Prime AHPI annualised ~8.8% USD over 14 years. Base scenario targets AHPI 854 by Dec 2026.",
+        "tab":        "tab-prime-forecast",
+        "accent":     C["purple"],
+        "kpis":       [("Prime ann. USD", "~8.8%/yr"), ("Gross rental yield", "8–12%"), ("Base AHPI 2026", "~854 avg")],
+        "quick_tabs": [("Prime Forecast", "tab-prime-forecast"), ("Dist. Forecast", "tab-district-forecast"),
+                       ("Forecast", "tab-forecast"), ("Invest. Calc", "tab-invest")],
+    },
+    "policy": {
+        "label":      "Policy Maker",
+        "icon":       "🏛",
+        "tagline":    "Assess housing affordability and macro transmission dynamics",
+        "detail":     "FX–AHPI correlation is 0.991. Kasoa is the strongest target for mass-housing programmes.",
+        "tab":        "tab-overview",
+        "accent":     C["teal"],
+        "kpis":       [("FX–AHPI corr.", "0.991"), ("Housing deficit", "~1.8 M units"), ("Kasoa GHS/sqm", "10,156")],
+        "quick_tabs": [("Overview", "tab-overview"), ("Macro Drivers", "tab-macro"),
+                       ("Districts", "tab-districts"), ("Forecast", "tab-forecast")],
+    },
+    "researcher": {
+        "label":      "Researcher / Data Scientist",
+        "icon":       "🔬",
+        "tagline":    "Explore 20 macro regressors and Prophet model diagnostics",
+        "detail":     "12 Prophet models trained across Bear/Base/Bull. Composite MAPE 7.8%; prime avg MAPE 2.8%.",
+        "tab":        "tab-macro",
+        "accent":     C["green"],
+        "kpis":       [("Top ρ (FX rate)", "0.991"), ("Composite MAPE", "7.8%"), ("Prime avg MAPE", "2.8%")],
+        "quick_tabs": [("Macro Drivers", "tab-macro"), ("Reg. Explorer", "tab-explorer"),
+                       ("Forecast", "tab-forecast"), ("Prime Forecast", "tab-prime-forecast")],
+    },
+}
 
 # ── app layout ────────────────────────────────────────────────────────────────
 app = dash.Dash(
@@ -2097,10 +3476,270 @@ app = dash.Dash(
 )
 server = app.server
 
-app.layout = html.Div(
+# ── landing page ───────────────────────────────────────────────────────────────
+_HERO_STATS = [
+    ("+1,303%", "GHS Growth",      "Mid-market nominal 2010 – 2024"),
+    ("+232%",   "USD Return",      "Prime areas real USD appreciation"),
+    ("11",      "Areas Tracked",   "5 mid-market districts + 6 prime"),
+    ("2029",    "Forecast Horizon","Bear · Base · Bull Prophet scenarios"),
+]
+
+def _make_landing() -> html.Div:
+    """Full-screen landing page with hero stats and role-selection cards."""
+
+    _SHARED_FONT = "'Inter', 'Segoe UI', Arial, sans-serif"
+
+    # ── 4 headline stat chips ────────────────────────────────────────────────
+    stat_row = dbc.Row([
+        dbc.Col(
+            html.Div([
+                html.Div(val,   style={"fontSize": "1.9rem", "fontWeight": "700",
+                                       "color": C["gold"], "lineHeight": "1"}),
+                html.Div(label, style={"fontSize": "0.88rem", "fontWeight": "600",
+                                       "color": C["text"], "marginTop": "5px"}),
+                html.Div(sub,   style={"fontSize": "0.68rem", "color": C["muted"],
+                                       "marginTop": "3px"}),
+            ], className="ahpi-stat-chip", style={
+                "backgroundColor": C["card"],
+                "border":          f"1px solid {C['border']}",
+                "borderRadius":    "10px",
+                "padding":         "18px 16px",
+                "textAlign":       "center",
+            }),
+            md=3, xs=6, className="mb-3",
+        )
+        for val, label, sub in _HERO_STATS
+    ], className="g-3 mb-5 justify-content-center ahpi-stats")
+
+    # ── role cards (6 roles, 3-column grid) ─────────────────────────────────
+    role_cards = dbc.Row([
+        dbc.Col(
+            html.Div(
+                dbc.Button(
+                    html.Div([
+                        html.Div(info["icon"], style={"fontSize": "2.2rem",
+                                                      "marginBottom": "10px",
+                                                      "lineHeight": "1"}),
+                        html.Div(info["label"],
+                                 style={"fontWeight": "700", "fontSize": "0.92rem",
+                                        "color": info["accent"], "marginBottom": "8px"}),
+                        html.Div(info["tagline"],
+                                 style={"fontSize": "0.73rem", "color": C["muted"],
+                                        "lineHeight": "1.5"}),
+                        html.Div("Enter  →",
+                                 style={"marginTop": "16px", "fontSize": "0.78rem",
+                                        "color": info["accent"], "fontWeight": "600",
+                                        "letterSpacing": "0.04em"}),
+                    ], style={"textAlign": "center"}),
+                    id={"type": "role-btn", "role": role_key},
+                    n_clicks=0, color="link",
+                    style={
+                        "backgroundColor": C["card"],
+                        "border":          f"1px solid {C['border']}",
+                        "borderRadius":    "12px",
+                        "padding":         "28px 18px",
+                        "width":           "100%",
+                        "textDecoration":  "none",
+                    },
+                    className="ahpi-role-card",
+                ),
+                style={"height": "100%"},
+            ),
+            md=4, xs=12, className="mb-3",
+        )
+        for role_key, info in ROLES.items()
+    ], className="g-3 mb-4 justify-content-center ahpi-roles")
+
+    return html.Div([
+
+        # ── top nav bar ──────────────────────────────────────────────────────
+        html.Div(
+            dbc.Container([
+                dbc.Row([
+                    dbc.Col(html.Div([
+                        html.Span("🏠 ", style={"fontSize": "1.2rem"}),
+                        html.Span("AHPI", style={"fontSize": "1.05rem", "fontWeight": "700",
+                                                  "color": C["gold"], "letterSpacing": "0.08em"}),
+                        html.Span(" · Accra Home Price Index",
+                                  style={"fontSize": "0.82rem", "color": C["muted"],
+                                         "marginLeft": "8px"}),
+                    ], className="d-flex align-items-center")),
+                    dbc.Col(
+                        dcc.Link(
+                            dbc.Button("Enter Dashboard →", color="warning", outline=True,
+                                       size="sm", style={"fontSize": "0.78rem"}),
+                            href="/dashboard",
+                        ),
+                        className="d-flex justify-content-end",
+                    ),
+                ], align="center"),
+            ], fluid=True),
+            style={"backgroundColor": C["card"],
+                   "borderBottom": f"1px solid {C['border']}",
+                   "padding": "12px 0"},
+        ),
+
+        # ── hero ─────────────────────────────────────────────────────────────
+        dbc.Container([
+            html.Div([
+
+                # title block
+                html.Div([
+                    html.Div("🏠", style={"fontSize": "3.2rem", "marginBottom": "14px",
+                                          "lineHeight": "1"}),
+                    html.H1("Accra Home Price Index",
+                            className="ahpi-title-glow",
+                            style={"fontSize": "2.7rem", "fontWeight": "700",
+                                   "color": C["gold"], "marginBottom": "14px",
+                                   "letterSpacing": "0.02em", "lineHeight": "1.15"}),
+                    html.P("Ghana's only monthly residential property benchmark",
+                           style={"fontSize": "1.1rem", "color": C["text"],
+                                  "marginBottom": "6px"}),
+                    html.P(
+                        "Jan 2010 – Dec 2024  ·  Mid-market (5 districts)  ·  "
+                        "Prime areas (6 locations)  ·  Prophet forecasts to 2029",
+                        style={"fontSize": "0.83rem", "color": C["muted"],
+                               "marginBottom": "52px"},
+                    ),
+                ], className="ahpi-hero"),
+
+                # stat chips
+                stat_row,
+
+                html.Hr(className="ahpi-section-divider", style={"margin": "0 0 44px"}),
+
+                # role selection
+                html.H5("Choose your profile for a tailored experience",
+                        style={"color": C["text"], "fontWeight": "600",
+                               "marginBottom": "30px", "textAlign": "center"}),
+                role_cards,
+
+                # skip link
+                html.Div(
+                    dcc.Link("Continue without a profile  →",
+                             href="/dashboard",
+                             className="ahpi-skip-link"),
+                    style={"textAlign": "center", "marginBottom": "56px"},
+                ),
+
+                # footer
+                html.Hr(className="ahpi-section-divider", style={"margin": "0 0 18px"}),
+                html.Div(
+                    "Data sources: World Bank Open Data · Bank of Ghana · LBMA · "
+                    "ICCO · EIA/Platts · Global Property Guide · Numbeo · "
+                    "JLL Africa · Knight Frank Africa",
+                    className="ahpi-footer-row",
+                    style={"color": C["muted"], "fontSize": "0.68rem",
+                           "textAlign": "center", "paddingBottom": "36px"},
+                ),
+
+            ], style={"textAlign": "center", "paddingTop": "80px"}),
+        ], fluid=True, style={"maxWidth": "980px"}),
+
+    ], style={
+        "backgroundColor": C["bg"],
+        "minHeight":        "100vh",
+        "fontFamily":       _SHARED_FONT,
+        "background":       (
+            f"radial-gradient(ellipse 80% 50% at 50% -10%, "
+            f"rgba(212,160,23,0.07) 0%, {C['bg']} 70%)"
+        ),
+    })
+
+
+# ── in-dashboard role banner ──────────────────────────────────────────────────
+def _make_role_banner(role_key: str | None) -> html.Div:
+    """Slim contextual banner beneath the main header; empty if no role is set."""
+    if not role_key or role_key not in ROLES:
+        return html.Div()
+
+    info   = ROLES[role_key]
+    accent = info["accent"]
+
+    kpi_chips = html.Div([
+        html.Span([
+            html.Span(lbl + " ", style={"color": C["muted"],
+                                        "fontSize": "0.67rem"}),
+            html.Span(val, style={"color": accent, "fontWeight": "700",
+                                  "fontSize": "0.8rem"}),
+        ], style={
+            "backgroundColor": C["hover"],
+            "border":          f"1px solid {C['border']}",
+            "borderRadius":    "4px",
+            "padding":         "3px 8px",
+            "marginRight":     "6px",
+            "whiteSpace":      "nowrap",
+        })
+        for lbl, val in info["kpis"]
+    ], className="d-flex align-items-center flex-wrap gap-1")
+
+    quick_btns = [
+        dbc.Button(
+            label,
+            id={"type": "banner-tab-btn", "tab": tab_id},
+            n_clicks=0, size="sm", color="link",
+            className="ahpi-role-banner-btn",
+            style={"fontSize": "0.7rem", "color": C["muted"],
+                   "padding": "1px 5px", "textDecoration": "none"},
+        )
+        for label, tab_id in info["quick_tabs"]
+    ]
+
+    return html.Div(
+        dbc.Container([
+            dbc.Row([
+                # identity
+                dbc.Col(html.Div([
+                    html.Span(info["icon"] + " ",
+                              style={"fontSize": "1.05rem", "marginRight": "6px"}),
+                    html.Span(info["label"].upper(),
+                              style={"fontWeight": "700", "color": accent,
+                                     "fontSize": "0.75rem", "letterSpacing": "0.07em",
+                                     "marginRight": "10px"}),
+                    html.Span(info["detail"],
+                              style={"color": C["muted"], "fontSize": "0.73rem"}),
+                ], className="d-flex align-items-center flex-wrap"), md=5),
+
+                # KPI chips
+                dbc.Col(kpi_chips, md=3),
+
+                # quick-jump buttons
+                dbc.Col(html.Div([
+                    html.Span("Jump to: ",
+                              style={"color": C["muted"], "fontSize": "0.68rem",
+                                     "marginRight": "4px", "whiteSpace": "nowrap"}),
+                    *quick_btns,
+                ], className="d-flex align-items-center flex-wrap"), md=3),
+
+                # switch profile
+                dbc.Col(
+                    dcc.Link(
+                        dbc.Button("⇄ Switch Profile", size="sm", color="link",
+                                   style={"fontSize": "0.68rem", "color": C["muted"],
+                                          "padding": "2px 6px"}),
+                        href="/",
+                    ),
+                    md=1, className="d-flex align-items-center justify-content-end",
+                ),
+            ], align="center", className="g-1"),
+        ], fluid=True),
+        style={
+            "backgroundColor": C["hover"],
+            "borderLeft":      f"3px solid {accent}",
+            "borderBottom":    f"1px solid {C['border']}",
+            "padding":         "8px 0",
+            "marginBottom":    "10px",
+        },
+    )
+
+
+_DASHBOARD_LAYOUT = html.Div(
     style={"backgroundColor": C["bg"], "minHeight": "100vh",
            "fontFamily": "'Inter', 'Segoe UI', Arial, sans-serif"},
     children=[
+
+        # ── role banner (populated by callback from user-role store) ────────
+        html.Div(id="role-banner"),
 
         # ── header ────────────────────────────────────────────────────────────
         html.Div(
@@ -2119,13 +3758,18 @@ app.layout = html.Div(
                     ], md=7),
                     dbc.Col([
                         html.Div([
-                            html.Span("AHPI Methodology: ",
+                            html.Span("USD/sqm benchmarks → GHS conversion at BoG rates → normalised 2015 = 100 → monthly interpolation",
                                       style={"color": C["muted"], "fontSize": "0.72rem"}),
-                            html.Span("USD/sqm anchors (GPG · Numbeo · JLL · Knight Frank) → GHS conversion "
-                                      "at Bank of Ghana rates → normalised 2015 = 100 → monthly interpolation",
-                                      style={"color": C["text"], "fontSize": "0.72rem"}),
                         ]),
-                    ], md=5, className="d-flex align-items-center"),
+                    ], md=4, className="d-flex align-items-center"),
+                    dbc.Col([
+                        dbc.Button(
+                            "ⓘ  Methodology",
+                            id="methodology-btn",
+                            size="sm", outline=True, color="warning",
+                            style={"fontSize": "0.72rem", "padding": "3px 10px"},
+                        ),
+                    ], md=1, className="d-flex align-items-center justify-content-end"),
                 ], align="center"),
             ], fluid=True),
             style={"backgroundColor": C["card"], "borderBottom": f"1px solid {C['border']}",
@@ -2179,11 +3823,40 @@ app.layout = html.Div(
                 dbc.Tab(tab_district_forecast, label="District Forecast", tab_id="tab-district-forecast",
                         label_style={"color": C["muted"], "fontSize": "0.85rem"},
                         active_label_style={"color": C["gold"], "fontWeight": "600"}),
+                dbc.Tab(tab_invest,   label="Investment Return", tab_id="tab-invest",
+                        label_style={"color": C["muted"], "fontSize": "0.85rem"},
+                        active_label_style={"color": C["gold"], "fontWeight": "600"}),
+                dbc.Tab(tab_mortgage, label="Mortgage Stress Test", tab_id="tab-mortgage",
+                        label_style={"color": C["muted"], "fontSize": "0.85rem"},
+                        active_label_style={"color": C["gold"], "fontWeight": "600"}),
+                dbc.Tab(tab_report,   label="Market Report PDF", tab_id="tab-report",
+                        label_style={"color": C["muted"], "fontSize": "0.85rem"},
+                        active_label_style={"color": C["gold"], "fontWeight": "600"}),
+                dbc.Tab(tab_snapshot, label="Snapshot Card",    tab_id="tab-snapshot",
+                        label_style={"color": C["muted"], "fontSize": "0.85rem"},
+                        active_label_style={"color": C["gold"], "fontWeight": "600"}),
             ], id="main-tabs", active_tab="tab-overview",
                style={"borderBottom": f"1px solid {C['border']}"},
                className="mb-3"),
 
         ], fluid=True),
+
+        # ── methodology modal ──────────────────────────────────────────────────
+        _METHODOLOGY_MODAL,
+
+        # ── KPI tooltips ───────────────────────────────────────────────────────
+        dbc.Tooltip("Accra Home Price Index · Base year 2015 = 100. An AHPI of 400 means property values are 4× their Jan 2015 level in GHS.",
+                    target="kpi-ahpi-label", placement="bottom"),
+        dbc.Tooltip("Average price in Ghanaian Cedis per square metre, across all tracked areas in the selected market segment.",
+                    target="kpi-ghs-label", placement="bottom"),
+        dbc.Tooltip("Average price in US Dollars per square metre. Useful for comparing across currencies.",
+                    target="kpi-usd-label", placement="bottom"),
+        dbc.Tooltip("GHS/USD exchange rate — how many cedis buy one dollar. Higher = weaker cedi. This is the single strongest driver of Accra property prices.",
+                    target="kpi-fx-label", placement="bottom"),
+        dbc.Tooltip("Annual Consumer Price Index (CPI) inflation rate in Ghana. High inflation nominally inflates GHS property values while eroding real purchasing power.",
+                    target="kpi-infl-label", placement="bottom"),
+        dbc.Tooltip("London Bullion Market gold spot price in USD per troy ounce. Ghana's gold exports support fiscal revenues, diaspora confidence, and cedi stability.",
+                    target="kpi-gold-label", placement="bottom"),
 
         # ── footer ─────────────────────────────────────────────────────────────
         html.Div(
@@ -2198,11 +3871,146 @@ app.layout = html.Div(
             style={"borderTop": f"1px solid {C['border']}", "padding": "10px 0",
                    "marginTop": "24px", "textAlign": "center"},
         ),
+
+        # ── hidden stores ───────────────────────────────────────────────────
+        dcc.Store(id="gis-resize-store"),
+        dcc.Store(id="gis-anim-playing", data=False),
     ],
 )
 
+# ── app.layout: routing container ─────────────────────────────────────────────
+# dcc.Location + dcc.Store are always in the DOM; page-content receives either
+# _make_landing() or _DASHBOARD_LAYOUT from the render_page callback.
+app.layout = html.Div([
+    dcc.Location(id="url", refresh=False),
+    dcc.Store(id="user-role", storage_type="session"),
+    html.Div(id="page-content"),
+])
+
 
 # ── callbacks ─────────────────────────────────────────────────────────────────
+
+# ── Page routing ──────────────────────────────────────────────────────────────
+@app.callback(
+    Output("page-content", "children"),
+    Input("url", "pathname"),
+)
+def render_page(pathname: str):
+    """Render either the landing page or the full dashboard."""
+    if pathname in (None, "/", ""):
+        return _make_landing()
+    return _DASHBOARD_LAYOUT
+
+
+# ── Role selection (landing page cards) ───────────────────────────────────────
+@app.callback(
+    Output("user-role", "data"),
+    Output("url",       "pathname"),
+    Input({"type": "role-btn", "role": ALL}, "n_clicks"),
+    prevent_initial_call=True,
+)
+def select_role(n_clicks_list):
+    """Store chosen role and navigate to the dashboard."""
+    ctx = dash.callback_context
+    if not ctx.triggered or all((n or 0) == 0 for n in n_clicks_list):
+        return dash.no_update, dash.no_update
+    triggered_id = ctx.triggered[0]["prop_id"].split(".")[0]
+    role_key = json.loads(triggered_id)["role"]
+    return role_key, "/dashboard"
+
+
+# ── Role banner (dashboard) ────────────────────────────────────────────────────
+@app.callback(
+    Output("role-banner", "children"),
+    Input("user-role", "data"),
+    prevent_initial_call=False,
+)
+def update_role_banner(role):
+    return _make_role_banner(role)
+
+
+# ── Tab navigation: set active tab on role load + banner quick-jump buttons ───
+@app.callback(
+    Output("main-tabs", "active_tab"),
+    Input("user-role",                       "data"),
+    Input({"type": "banner-tab-btn", "tab": ALL}, "n_clicks"),
+    prevent_initial_call=True,
+)
+def set_active_tab(role, _tab_btn_clicks):
+    """Jump to the role's default tab on login; respect banner quick-jump clicks."""
+    triggered = dash.callback_context.triggered[0]["prop_id"]
+    if "banner-tab-btn" in triggered:
+        tab_id = json.loads(triggered.split(".")[0])["tab"]
+        return tab_id
+    if role and role in ROLES:
+        return ROLES[role]["tab"]
+    return "tab-overview"
+
+
+# ── Animation: play / pause toggle ───────────────────────────────────────────
+# Flips the playing state, enables/disables the interval, and updates the button label.
+app.clientside_callback(
+    """
+    function(n_clicks, playing) {
+        var now_playing = !playing;
+        return [now_playing, !now_playing, now_playing ? '\u23f8' : '\u25b6'];
+    }
+    """,
+    Output("gis-anim-playing",  "data"),
+    Output("gis-anim-interval", "disabled"),
+    Output("gis-anim-btn",      "children"),
+    Input("gis-anim-btn",  "n_clicks"),
+    State("gis-anim-playing", "data"),
+    prevent_initial_call=True,
+)
+
+# ── Animation: advance one frame per interval tick ───────────────────────────
+app.clientside_callback(
+    """
+    function(n_intervals, year) {
+        return year >= 2029 ? 2010 : year + 1;
+    }
+    """,
+    Output("gis-anim-year", "value"),
+    Input("gis-anim-interval", "n_intervals"),
+    State("gis-anim-year",     "value"),
+    prevent_initial_call=True,
+)
+
+# ── Animation: year badge (HISTORICAL / PROJECTED) ───────────────────────────
+app.clientside_callback(
+    """
+    function(year) {
+        if (year >= 2025) {
+            return year + ' \u2014 PROJECTED';
+        }
+        return year + ' \u2014 HISTORICAL';
+    }
+    """,
+    Output("gis-anim-badge", "children"),
+    Input("gis-anim-year", "value"),
+)
+
+
+# Dispatch a window resize event whenever the Map tab becomes active.
+# Leaflet listens for this and calls map.invalidateSize() internally,
+# which fills any blank tile areas caused by rendering inside a hidden tab.
+app.clientside_callback(
+    """
+    function(active_tab) {
+        if (active_tab === 'tab-map') {
+            setTimeout(function() {
+                window.dispatchEvent(new Event('resize'));
+            }, 150);
+        }
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("gis-resize-store", "data"),
+    Input("main-tabs", "active_tab"),
+    prevent_initial_call=True,
+)
+
 
 @app.callback(
     Output("range-label", "children"),
@@ -2413,38 +4221,737 @@ def update_forecast(show_ci):
     return build_forecast_fig(show_ci=bool(show_ci))
 
 
+# ── methodology modal toggle ──────────────────────────────────────────────────
 @app.callback(
-    Output("prime-forecast-chart", "figure"),
-    Output("prime-fc-metrics",     "children"),
-    Output("prime-fc-targets",     "children"),
-    Input("prime-fc-ci",   "value"),
-    Input("prime-fc-area", "value"),
+    Output("methodology-modal", "is_open"),
+    Input("methodology-btn",        "n_clicks"),
+    Input("methodology-modal-close","n_clicks"),
+    State("methodology-modal", "is_open"),
+    prevent_initial_call=True,
+)
+def toggle_methodology_modal(open_clicks, close_clicks, is_open):
+    return not is_open
+
+
+# ── download: Overview ────────────────────────────────────────────────────────
+@app.callback(
+    Output("dl-overview", "data"),
+    Input("dl-overview-btn", "n_clicks"),
+    State("year-range",       "value"),
+    State("overview-segment", "value"),
+    prevent_initial_call=True,
+)
+def dl_overview(_, yr_range, segment):
+    if segment == "prime":
+        dff = filter_df_prime(yr_range[0], yr_range[1])
+        cols = ["ds", "district", "y", "price_ghs_per_sqm", "price_usd_per_sqm"]
+    else:
+        dff  = filter_df(yr_range[0], yr_range[1])
+        cols = ["ds", "y", "price_ghs_per_sqm", "price_usd_per_sqm",
+                "exchange_rate_ghs_usd", "inflation_cpi_pct"]
+    return dcc.send_data_frame(dff[cols].to_csv, "ahpi_overview.csv", index=False)
+
+
+# ── download: Macro ───────────────────────────────────────────────────────────
+@app.callback(
+    Output("dl-macro", "data"),
+    Input("dl-macro-btn", "n_clicks"),
+    State("year-range",  "value"),
+    State("macro-vars",  "value"),
+    prevent_initial_call=True,
+)
+def dl_macro(_, yr_range, macro_vars):
+    dff  = filter_df(yr_range[0], yr_range[1])
+    cols = ["ds"] + [v for v in (macro_vars or []) if v in dff.columns]
+    return dcc.send_data_frame(dff[cols].to_csv, "ahpi_macro.csv", index=False)
+
+
+# ── download: Commodities ─────────────────────────────────────────────────────
+@app.callback(
+    Output("dl-commodities", "data"),
+    Input("dl-commodities-btn", "n_clicks"),
+    State("year-range", "value"),
+    prevent_initial_call=True,
+)
+def dl_commodities(_, yr_range):
+    dff  = filter_df(yr_range[0], yr_range[1])
+    cols = ["ds", "gold_price_usd", "oil_brent_usd", "cocoa_price_usd"]
+    return dcc.send_data_frame(dff[cols].to_csv, "ahpi_commodities.csv", index=False)
+
+
+# ── download: Districts ───────────────────────────────────────────────────────
+@app.callback(
+    Output("dl-districts", "data"),
+    Input("dl-districts-btn",  "n_clicks"),
+    State("year-range",         "value"),
+    State("district-selector",  "value"),
+    prevent_initial_call=True,
+)
+def dl_districts(_, yr_range, district):
+    dff  = filter_df_district(yr_range[0], yr_range[1], district or "all")
+    cols = ["ds", "district", "y", "price_ghs_per_sqm", "price_usd_per_sqm"]
+    return dcc.send_data_frame(dff[cols].to_csv, "ahpi_districts.csv", index=False)
+
+
+# ── download: Prime Areas ─────────────────────────────────────────────────────
+@app.callback(
+    Output("dl-prime", "data"),
+    Input("dl-prime-btn",    "n_clicks"),
+    State("year-range",       "value"),
+    State("prime-selector",   "value"),
+    prevent_initial_call=True,
+)
+def dl_prime(_, yr_range, area):
+    dff  = filter_df_prime(yr_range[0], yr_range[1], area or "all")
+    cols = ["ds", "district", "y", "price_ghs_per_sqm", "price_usd_per_sqm"]
+    return dcc.send_data_frame(dff[cols].to_csv, "ahpi_prime_areas.csv", index=False)
+
+
+# ── download: Forecast ZIP (mid-market) ───────────────────────────────────────
+@app.callback(
+    Output("dl-forecast", "data"),
+    Input("dl-forecast-btn", "n_clicks"),
+    prevent_initial_call=True,
+)
+def dl_forecast(_):
+    files = {
+        "ahpi_test_eval.csv":        DF_TEST_EVAL,
+        "ahpi_forecast_bear.csv":    DF_FC_BEAR,
+        "ahpi_forecast_base.csv":    DF_FC_BASE,
+        "ahpi_forecast_bull.csv":    DF_FC_BULL,
+    }
+    return dcc.send_bytes(_zip_dfs(files), "ahpi_midmarket_forecasts.zip")
+
+
+# ── download: Prime Forecast ZIP ──────────────────────────────────────────────
+@app.callback(
+    Output("dl-prime-forecast", "data"),
+    Input("dl-prime-forecast-btn", "n_clicks"),
+    State("prime-fc-area", "value"),
+    prevent_initial_call=True,
+)
+def dl_prime_forecast(_, area):
+    area = area or "all"
+    if area == "all":
+        files = {f"prime_test_eval_{slug}.csv": _PRIME_TEST_EVALS[a]
+                 for a, slug in PRIME_AREA_SLUGS.items()}
+        for sc in ("bear", "base", "bull"):
+            for a, slug in PRIME_AREA_SLUGS.items():
+                files[f"prime_forecast_{sc}_{slug}.csv"] = _PRIME_FC[(sc, a)]
+        files["prime_test_summary.csv"] = _PRIME_TEST_SUMMARY
+    else:
+        slug  = PRIME_AREA_SLUGS[area]
+        files = {f"prime_test_eval_{slug}.csv": _PRIME_TEST_EVALS[area]}
+        for sc in ("bear", "base", "bull"):
+            files[f"prime_forecast_{sc}_{slug}.csv"] = _PRIME_FC[(sc, area)]
+    label = "all_areas" if area == "all" else PRIME_AREA_SLUGS[area]
+    return dcc.send_bytes(_zip_dfs(files), f"ahpi_prime_forecast_{label}.zip")
+
+
+# ── download: District Forecast ZIP ──────────────────────────────────────────
+@app.callback(
+    Output("dl-district-forecast", "data"),
+    Input("dl-district-forecast-btn", "n_clicks"),
+    State("district-fc-area", "value"),
+    prevent_initial_call=True,
+)
+def dl_district_forecast(_, district):
+    district = district or "all"
+    if district == "all":
+        files = {f"district_test_eval_{slug}.csv": _DISTRICT_TEST_EVALS[d]
+                 for d, slug in DISTRICT_SLUGS.items()}
+        for sc in ("bear", "base", "bull"):
+            for d, slug in DISTRICT_SLUGS.items():
+                files[f"district_forecast_{sc}_{slug}.csv"] = _DISTRICT_FC[(sc, d)]
+        files["district_test_summary.csv"] = _DISTRICT_TEST_SUMMARY
+    else:
+        slug  = DISTRICT_SLUGS[district]
+        files = {f"district_test_eval_{slug}.csv": _DISTRICT_TEST_EVALS[district]}
+        for sc in ("bear", "base", "bull"):
+            files[f"district_forecast_{sc}_{slug}.csv"] = _DISTRICT_FC[(sc, district)]
+    label = "all_districts" if district == "all" else DISTRICT_SLUGS[district]
+    return dcc.send_bytes(_zip_dfs(files), f"ahpi_district_forecast_{label}.zip")
+
+
+# ── forecast-tab year-selector callbacks ──────────────────────────────────────
+@app.callback(
+    Output("forecast-targets",         "children"),
+    Output("forecast-targets-heading", "children"),
+    Input("forecast-year", "value"),
     prevent_initial_call=False,
 )
-def update_prime_forecast(show_ci, area):
+def update_forecast_targets(year):
+    year = year or 2026
+    return _build_fc_targets_div(year), f"Dec {year} AHPI targets by scenario"
+
+
+@app.callback(
+    Output("prime-forecast-chart",     "figure"),
+    Output("prime-fc-metrics",         "children"),
+    Output("prime-fc-targets",         "children"),
+    Output("prime-fc-targets-heading", "children"),
+    Input("prime-fc-ci",   "value"),
+    Input("prime-fc-area", "value"),
+    Input("prime-fc-year", "value"),
+    prevent_initial_call=False,
+)
+def update_prime_forecast(show_ci, area, year):
     area = area or "all"
+    year = year or 2026
     return (
         build_prime_forecast_fig(area, show_ci=bool(show_ci)),
         _build_prime_metrics_div(area),
-        _build_prime_targets_div(area),
+        _build_prime_targets_div(area, year),
+        f"Dec {year} AHPI targets by scenario",
     )
 
 
 @app.callback(
-    Output("district-forecast-chart", "figure"),
-    Output("district-fc-metrics",     "children"),
-    Output("district-fc-targets",     "children"),
+    Output("district-forecast-chart",     "figure"),
+    Output("district-fc-metrics",         "children"),
+    Output("district-fc-targets",         "children"),
+    Output("district-fc-targets-heading", "children"),
     Input("district-fc-ci",   "value"),
     Input("district-fc-area", "value"),
+    Input("district-fc-year", "value"),
     prevent_initial_call=False,
 )
-def update_district_forecast(show_ci, district):
+def update_district_forecast(show_ci, district, year):
     district = district or "all"
+    year     = year or 2026
     return (
         build_district_forecast_fig(district, show_ci=bool(show_ci)),
         _build_district_metrics_div(district),
-        _build_district_targets_div(district),
+        _build_district_targets_div(district, year),
+        f"Dec {year} AHPI targets by scenario",
     )
+
+
+# ── Investment Return Calculator callbacks ─────────────────────────────────────
+@app.callback(
+    Output("inv-buy-price-display", "children"),
+    Output("inv-buy-usd-display",   "children"),
+    Output("inv-buy-fx-display",    "children"),
+    Input("inv-market",   "value"),
+    Input("inv-buy-year", "value"),
+    prevent_initial_call=False,
+)
+def update_inv_buy_info(market, buy_year):
+    row = _get_hist_dec(market or "composite", buy_year or 2020)
+    if row is None:
+        return "—", "—", "—"
+    return (
+        f"GHS {row.get('price_ghs_per_sqm', 0):,.0f}",
+        f"USD {row.get('price_usd_per_sqm', 0):,.0f}",
+        f"{row.get('exchange_rate_ghs_usd', 0):.2f}",
+    )
+
+
+@app.callback(
+    Output("inv-results", "children"),
+    Input("inv-market",    "value"),
+    Input("inv-buy-year",  "value"),
+    Input("inv-sell-year", "value"),
+    Input("inv-sqm",       "value"),
+    prevent_initial_call=False,
+)
+def update_inv_results(market, buy_year, sell_year, sqm):
+    market   = market   or "composite"
+    buy_year = buy_year or 2020
+    sell_year = sell_year or 2027
+    sqm      = sqm or 100
+    years    = sell_year - buy_year
+    if years <= 0:
+        return html.Div("Sell year must be after buy year.",
+                        style={"color": C["red"], "padding": "20px"})
+
+    buy_row = _get_hist_dec(market, buy_year)
+    if buy_row is None:
+        return html.Div("No historical data for this market / buy year.",
+                        style={"color": C["muted"], "padding": "20px"})
+
+    buy_ghs = float(buy_row.get("price_ghs_per_sqm", 0))
+    buy_usd = float(buy_row.get("price_usd_per_sqm", 0))
+    buy_fx  = float(buy_row.get("exchange_rate_ghs_usd", 1))
+    buy_ahpi = float(buy_row.get("y", 100))
+
+    cols = []
+    for sc in ("bear", "base", "bull"):
+        color, _, label = SCENARIO_STYLES[sc]
+        fc_row = _get_fc_dec(market, sc, sell_year)
+        if fc_row is None:
+            cols.append(_scenario_col(sc, label, color,
+                                      [html.Div("No forecast data", style={"color": C["muted"]})]))
+            continue
+
+        sell_ahpi = float(fc_row["yhat"])
+        sell_ahpi_lo = float(fc_row["yhat_lower"])
+        sell_ahpi_hi = float(fc_row["yhat_upper"])
+        sell_fx   = SCENARIO_FX[sc]
+
+        # Property values
+        sell_ghs  = buy_ghs * (sell_ahpi / buy_ahpi) if buy_ahpi else 0
+        sell_usd  = sell_ghs / sell_fx if sell_fx else 0
+
+        total_buy_ghs  = buy_ghs  * sqm
+        total_sell_ghs = sell_ghs * sqm
+        total_buy_usd  = buy_usd  * sqm
+        total_sell_usd = sell_usd * sqm
+
+        ghs_ret  = (total_sell_ghs - total_buy_ghs) / total_buy_ghs * 100 if total_buy_ghs else 0
+        usd_ret  = (total_sell_usd - total_buy_usd) / total_buy_usd * 100 if total_buy_usd else 0
+        ghs_cagr = ((total_sell_ghs / total_buy_ghs) ** (1 / years) - 1) * 100 if total_buy_ghs else 0
+        usd_cagr = ((total_sell_usd / total_buy_usd) ** (1 / years) - 1) * 100 if total_buy_usd else 0
+
+        # Benchmarks
+        tbill_rate  = SCENARIO_TBILL[sc] / 100
+        tbill_final = total_buy_ghs * (1 + tbill_rate) ** years
+        tbill_ret   = (tbill_final - total_buy_ghs) / total_buy_ghs * 100
+
+        usd_dep_final = total_buy_usd * (1 + USD_DEPOSIT_RATE / 100) ** years
+        usd_dep_ret   = (usd_dep_final - total_buy_usd) / total_buy_usd * 100
+
+        # Colour helpers
+        ghs_col = C["green"] if ghs_ret >= 0 else C["red"]
+        usd_col = C["green"] if usd_ret >= 0 else C["red"]
+        vs_tbill = "outperforms" if ghs_ret > tbill_ret else "underperforms"
+        vs_usd   = "outperforms" if usd_ret > usd_dep_ret else "underperforms"
+
+        cols.append(_scenario_col(sc, label, color, [
+            _result_card("AHPI at sell",
+                         f"{sell_ahpi:.1f}  [{sell_ahpi_lo:.1f}–{sell_ahpi_hi:.1f}]",
+                         f"90% CI · was {buy_ahpi:.1f} at purchase", color),
+            _result_card("Sell price (GHS/sqm)",
+                         f"GHS {sell_ghs:,.0f}",
+                         f"was GHS {buy_ghs:,.0f}", color),
+            _result_card("Sell price (USD/sqm)",
+                         f"USD {sell_usd:,.0f}",
+                         f"was USD {buy_usd:,.0f}  ·  FX: {sell_fx} GHS/USD", C["blue"]),
+            _result_card(f"GHS return  ({sqm} sqm · {years}y)",
+                         f"{ghs_ret:+.1f}%",
+                         f"CAGR {ghs_cagr:+.1f}% p.a.", ghs_col),
+            _result_card(f"USD return  ({sqm} sqm · {years}y)",
+                         f"{usd_ret:+.1f}%",
+                         f"CAGR {usd_cagr:+.1f}% p.a.", usd_col),
+            html.Div([
+                html.Div("vs Benchmarks", style={"fontSize": "0.7rem", "color": C["muted"],
+                                                   "textTransform": "uppercase",
+                                                   "marginBottom": "4px"}),
+                html.Div(f"🇬🇭 T-Bill ({SCENARIO_TBILL[sc]}% p.a.): {tbill_ret:+.1f}% total  "
+                         f"→ property {vs_tbill}",
+                         style={"fontSize": "0.75rem", "color": C["muted"]}),
+                html.Div(f"💵 USD deposit ({USD_DEPOSIT_RATE}% p.a.): {usd_dep_ret:+.1f}% total  "
+                         f"→ {vs_usd} in USD terms",
+                         style={"fontSize": "0.75rem", "color": C["muted"]}),
+            ], style={"backgroundColor": C["hover"], "padding": "8px 12px",
+                      "borderRadius": "6px", "border": f"1px solid {C['border']}"}),
+        ]))
+
+    return dbc.Row([c for c in cols], className="g-2")
+
+
+# ── Mortgage Stress Test callbacks ─────────────────────────────────────────────
+@app.callback(
+    Output("mort-value", "value"),
+    Input("mort-district", "value"),
+    Input("mort-sqm",      "value"),
+    prevent_initial_call=False,
+)
+def prefill_mort_value(district, sqm):
+    """Auto-fill property value from latest AHPI data."""
+    sqm = sqm or 100
+    district = district or DISTRICTS[0]
+    row = _get_hist_dec(district, 2024)
+    if row is None:
+        return sqm * 3000
+    return round(float(row.get("price_ghs_per_sqm", 3000)) * sqm, -3)
+
+
+@app.callback(
+    Output("mort-results", "children"),
+    Input("mort-district", "value"),
+    Input("mort-sqm",      "value"),
+    Input("mort-value",    "value"),
+    Input("mort-ltv",      "value"),
+    Input("mort-term",     "value"),
+    Input("mort-rate",     "value"),
+    Input("mort-year",     "value"),
+    prevent_initial_call=False,
+)
+def update_mort_results(district, sqm, prop_value, ltv, term, rate, check_year):
+    district   = district   or DISTRICTS[0]
+    sqm        = sqm        or 100
+    prop_value = prop_value or 300_000
+    ltv        = ltv        or 70
+    term       = term       or 20
+    rate       = rate       or 28.0
+    check_year = check_year or 2027
+
+    loan_amount  = prop_value * ltv / 100
+    monthly_rate = rate / 100 / 12
+    n_payments   = term * 12
+
+    if monthly_rate > 0:
+        monthly_pmt = (loan_amount * monthly_rate * (1 + monthly_rate) ** n_payments
+                       / ((1 + monthly_rate) ** n_payments - 1))
+    else:
+        monthly_pmt = loan_amount / n_payments
+
+    total_paid    = monthly_pmt * n_payments
+    total_int     = total_paid - loan_amount
+    pct_income    = monthly_pmt / GHANA_MEDIAN_INCOME_GHS * 100
+
+    if pct_income <= 30:
+        afford_color, afford_label = C["green"], "Affordable  (≤ 30% of median income)"
+    elif pct_income <= 50:
+        afford_color, afford_label = C["orange"], "Stretched  (30–50% of median income)"
+    else:
+        afford_color, afford_label = C["red"], "Unaffordable  (> 50% of median income)"
+
+    # Repayment section
+    repay_section = dbc.Col([
+        html.Div("Monthly Repayment", style={"fontSize": "0.75rem", "color": C["muted"],
+                                              "fontWeight": "600", "marginBottom": "8px"}),
+        _result_card("Monthly payment", f"GHS {monthly_pmt:,.0f}",
+                     f"on a {term}-year loan at {rate}% p.a.", C["gold"]),
+        _result_card("Loan amount",   f"GHS {loan_amount:,.0f}",
+                     f"{ltv}% of GHS {prop_value:,.0f}"),
+        _result_card("Total repaid",  f"GHS {total_paid:,.0f}",
+                     f"interest: GHS {total_int:,.0f}"),
+        html.Div([
+            html.Div("Affordability",
+                     style={"fontSize": "0.7rem", "color": C["muted"],
+                            "textTransform": "uppercase", "marginBottom": "4px"}),
+            html.Div(f"{pct_income:.1f}% of Ghana median household income (GHS {GHANA_MEDIAN_INCOME_GHS:,}/mo)",
+                     style={"fontSize": "0.8rem", "color": afford_color, "fontWeight": "600"}),
+            html.Div(afford_label, style={"fontSize": "0.75rem", "color": afford_color}),
+        ], style={"backgroundColor": C["hover"], "padding": "10px 14px", "borderRadius": "6px",
+                  "border": f"2px solid {afford_color}"}),
+    ], md=4)
+
+    # Collateral stress test (3 scenarios)
+    stress_cols = []
+    for sc in ("bear", "base", "bull"):
+        color, _, label = SCENARIO_STYLES[sc]
+        fc_row = _get_fc_dec(district, sc, check_year)
+        if fc_row is None:
+            stress_cols.append(_scenario_col(sc, label, color,
+                                             [html.Div("No data", style={"color": C["muted"]})]))
+            continue
+
+        hist_row  = _get_hist_dec(district, 2024)
+        ahpi_2024 = float(hist_row["y"]) if hist_row is not None else 100
+        ghs_2024  = float(hist_row.get("price_ghs_per_sqm", prop_value / sqm)) if hist_row is not None else prop_value / sqm
+
+        sell_ahpi = float(fc_row["yhat"])
+        collateral = ghs_2024 * (sell_ahpi / ahpi_2024) * sqm
+        ltv_ratio  = loan_amount / collateral * 100 if collateral else 0
+        change_pct = (collateral - prop_value) / prop_value * 100
+
+        ltv_col = C["green"] if ltv_ratio < 80 else (C["orange"] if ltv_ratio < 100 else C["red"])
+        ltv_warn = "" if ltv_ratio < 80 else (" — WATCH" if ltv_ratio < 100 else " — UNDERWATER")
+
+        stress_cols.append(_scenario_col(sc, f"{label} · Dec {check_year}", color, [
+            _result_card("Collateral value", f"GHS {collateral:,.0f}",
+                         f"{change_pct:+.1f}% vs today", color),
+            _result_card("LTV at check year", f"{ltv_ratio:.1f}%",
+                         f"Loan: GHS {loan_amount:,.0f}{ltv_warn}", ltv_col),
+        ]))
+
+    stress_section = dbc.Col([
+        html.Div(f"Collateral Stress Test — Dec {check_year}",
+                 style={"fontSize": "0.75rem", "color": C["muted"],
+                        "fontWeight": "600", "marginBottom": "8px"}),
+        dbc.Row(stress_cols, className="g-2"),
+        html.Div(
+            f"LTV > 80%: watch list. LTV > 100%: collateral below outstanding loan. "
+            f"Median income proxy: GHS {GHANA_MEDIAN_INCOME_GHS:,}/month.",
+            style={"fontSize": "0.72rem", "color": C["muted"],
+                   "marginTop": "8px", "fontStyle": "italic"},
+        ),
+    ], md=8)
+
+    return dbc.Row([repay_section, stress_section], className="g-2")
+
+
+# ── GIS choropleth callbacks ──────────────────────────────────────────────────
+@app.callback(
+    Output("gis-geojson",    "data"),
+    Output("gis-geojson",    "style"),
+    Output("gis-geojson",    "onEachFeature"),
+    Output("gis-legend",     "children"),
+    Output("gis-tile-layer", "url"),
+    Output("gis-tile-layer", "attribution"),
+    Input("gis-layer",        "value"),
+    Input("gis-price-metric", "value"),
+    Input("gis-scenario",     "value"),
+    Input("gis-fc-year",      "value"),
+    Input("gis-tiles",        "value"),
+    Input("gis-anim-year",    "value"),
+    prevent_initial_call=False,
+)
+def update_gis_map(layer, price_metric, scenario, fc_year, tile_key, anim_year):
+    tile_key  = tile_key or "dark"
+    tile_url, tile_attr = _TILE_URLS.get(tile_key, _TILE_URLS["dark"])
+    scenario  = scenario or "base"
+    anim_year = int(anim_year or 2024)
+
+    _METRIC_MAP = {
+        "usd_sqm": ("usd_sqm", "USD / sqm", ""),
+        "ghs_sqm": ("ghs_sqm", "GHS / sqm", ""),
+        "ahpi":    ("ahpi",    "AHPI",       " pts"),
+    }
+    snap_key, metric_label, unit = _METRIC_MAP.get(price_metric or "usd_sqm",
+                                                    ("usd_sqm", "USD/sqm", ""))
+
+    if layer == "price":
+        # Slider drives the year; 2025+ yields AHPI-only with a projected label
+        gj, lo, hi = _build_timeline_geojson(anim_year, snap_key, scenario)
+        style_fn   = _style_price
+        each_fn    = _on_each_feature_timeline
+        if anim_year >= 2025:
+            legend = _legend_strip(_CS_GOLD_TO_RED, lo, hi,
+                                   f"AHPI (proj · {scenario.title()}) · Dec {anim_year}", " pts")
+        else:
+            legend = _legend_strip(_CS_GOLD_TO_RED, lo, hi,
+                                   f"{metric_label} · Dec {anim_year}", unit)
+    else:
+        # Forecast-growth layer: clamp slider to valid forecast range
+        fc_y = anim_year if anim_year >= 2025 else int(fc_year or 2027)
+        gj, lo, hi = _build_forecast_geojson(scenario, fc_y)
+        style_fn   = _style_forecast
+        each_fn    = _on_each_feature_forecast
+        legend     = _legend_strip(
+            _CS_BLUE_TO_GREEN, lo, hi,
+            f"AHPI Growth vs Dec 2024 — {scenario.title()} {fc_y}", "%")
+
+    return gj, style_fn, each_fn, legend, tile_url, tile_attr
+
+
+@app.callback(
+    Output("gis-dl", "data"),
+    Input("gis-dl-btn",       "n_clicks"),
+    State("gis-layer",        "value"),
+    State("gis-price-metric", "value"),
+    State("gis-scenario",     "value"),
+    State("gis-fc-year",      "value"),
+    prevent_initial_call=True,
+)
+def download_geojson(n_clicks, layer, price_metric, scenario, fc_year):
+    fc_year  = int(fc_year or 2027)
+    scenario = scenario or "base"
+    _METRIC_MAP = {
+        "usd_sqm": "usd_sqm",
+        "ghs_sqm": "ghs_sqm",
+        "ahpi":    "ahpi",
+    }
+    snap_key = _METRIC_MAP.get(price_metric or "usd_sqm", "usd_sqm")
+
+    if layer == "price":
+        gj, _, _ = _build_price_geojson(snap_key)
+        fname    = f"accra_price_heatmap_{snap_key}.geojson"
+    else:
+        gj, _, _ = _build_forecast_geojson(scenario, fc_year)
+        fname    = f"accra_forecast_growth_{scenario}_{fc_year}.geojson"
+
+    return dcc.send_bytes(
+        json.dumps(gj, indent=2).encode(),
+        fname,
+    )
+
+
+# ── Market Report PDF callback ────────────────────────────────────────────────
+@app.callback(
+    Output("report-pdf-dl",      "data"),
+    Output("report-preview",     "children"),
+    Input("report-pdf-btn",      "n_clicks"),
+    State("report-market",       "value"),
+    State("report-year",         "value"),
+    prevent_initial_call=True,
+)
+def generate_pdf_report(n_clicks, market, report_year):
+    market      = market or "composite"
+    report_year = int(report_year or 2027)
+    label       = "Composite Mid-Market" if market == "composite" else market
+
+    try:
+        pdf_bytes = generate_market_pdf(market, report_year)
+        filename  = f"AHPI_Report_{label.replace(' ', '_').replace('/', '-')}_{report_year}.pdf"
+        preview   = html.Div([
+            html.Div("Report generated successfully.", style={"color": C["green"],
+                                                               "fontWeight": "600",
+                                                               "marginBottom": "8px"}),
+            html.Div(f"Market: {label}", style={"color": C["text"]}),
+            html.Div(f"Forecast horizon: Dec {report_year}", style={"color": C["text"]}),
+            html.Div(f"File: {filename}", style={"color": C["muted"], "fontSize": "0.75rem",
+                                                  "marginTop": "6px"}),
+        ])
+        return dcc.send_bytes(pdf_bytes, filename), preview
+    except Exception as exc:
+        err = html.Div(f"Error generating PDF: {exc}",
+                       style={"color": C["red"], "fontSize": "0.8rem"})
+        return dash.no_update, err
+
+
+# ── Snapshot card callback ─────────────────────────────────────────────────────
+@app.callback(
+    Output("snap-card-container", "children"),
+    Input("snap-market",          "value"),
+    Input("snap-year",            "value"),
+    prevent_initial_call=False,
+)
+def update_snapshot_card(market, snap_year):
+    market    = market or "composite"
+    snap_year = int(snap_year or 2027)
+    label     = "Composite Mid-Market" if market == "composite" else market
+    family    = ("Mid-Market" if market in DISTRICTS else
+                 ("Prime" if market in PRIME_AREAS else "Composite"))
+
+    hist_2024 = _get_hist_dec(market, 2024)
+    hist_2023 = _get_hist_dec(market, 2023)
+
+    # Current AHPI
+    if hist_2024 is not None:
+        ahpi_now = float(hist_2024.get("y", 0))
+        ghs_sqm  = hist_2024.get("price_ghs_per_sqm")
+        usd_sqm  = hist_2024.get("price_usd_per_sqm")
+        ahpi_prev = float(hist_2023.get("y", ahpi_now)) if hist_2023 is not None else ahpi_now
+        yoy_pct  = (ahpi_now - ahpi_prev) / ahpi_prev * 100 if ahpi_prev else 0
+        yoy_color = C["green"] if yoy_pct >= 0 else C["red"]
+        yoy_str   = f"{yoy_pct:+.1f}% YoY"
+    else:
+        ahpi_now, ghs_sqm, usd_sqm, yoy_str, yoy_color = None, None, None, "—", C["muted"]
+
+    # Forecast rows
+    fc_rows = []
+    for sc in ("bear", "base", "bull"):
+        color, _, sc_label = SCENARIO_STYLES[sc]
+        fc_row = _get_fc_dec(market, sc, snap_year)
+        if fc_row is not None:
+            yhat = float(fc_row["yhat"])
+            lo   = float(fc_row["yhat_lower"])
+            hi   = float(fc_row["yhat_upper"])
+            chg  = (yhat - ahpi_now) / ahpi_now * 100 if ahpi_now else 0
+            chg_c = C["green"] if chg >= 0 else C["red"]
+            fc_rows.append(html.Tr([
+                html.Td(sc_label.split()[0],
+                        style={"color": color, "fontWeight": "700",
+                               "padding": "5px 10px", "fontSize": "0.8rem"}),
+                html.Td(f"{yhat:.1f}",
+                        style={"color": C["text"], "padding": "5px 10px",
+                               "fontWeight": "600", "fontSize": "0.95rem"}),
+                html.Td(f"[{lo:.1f} – {hi:.1f}]",
+                        style={"color": C["muted"], "padding": "5px 10px",
+                               "fontSize": "0.75rem"}),
+                html.Td(f"{chg:+.1f}%",
+                        style={"color": chg_c, "padding": "5px 10px",
+                               "fontSize": "0.8rem", "fontWeight": "600"}),
+                html.Td(f"GHS/USD → {SCENARIO_FX[sc]:.0f}",
+                        style={"color": C["muted"], "padding": "5px 10px",
+                               "fontSize": "0.75rem"}),
+            ], style={"borderBottom": f"1px solid {C['border']}"}))
+
+    # Build the card
+    stat_items = []
+    if ahpi_now is not None:
+        stat_items.append(
+            dbc.Col(html.Div([
+                html.Div("AHPI Dec 2024", style={"fontSize": "0.65rem", "color": C["muted"],
+                                                  "textTransform": "uppercase"}),
+                html.Div(f"{ahpi_now:.1f}",
+                         style={"fontSize": "1.6rem", "fontWeight": "700", "color": C["gold"]}),
+                html.Div(yoy_str, style={"fontSize": "0.75rem", "color": yoy_color}),
+            ], style={"textAlign": "center"}), md=3)
+        )
+    if ghs_sqm is not None:
+        stat_items.append(
+            dbc.Col(html.Div([
+                html.Div("GHS / sqm", style={"fontSize": "0.65rem", "color": C["muted"],
+                                              "textTransform": "uppercase"}),
+                html.Div(f"{float(ghs_sqm):,.0f}",
+                         style={"fontSize": "1.4rem", "fontWeight": "700", "color": C["text"]}),
+            ], style={"textAlign": "center"}), md=3)
+        )
+    if usd_sqm is not None:
+        stat_items.append(
+            dbc.Col(html.Div([
+                html.Div("USD / sqm", style={"fontSize": "0.65rem", "color": C["muted"],
+                                              "textTransform": "uppercase"}),
+                html.Div(f"{float(usd_sqm):,.0f}",
+                         style={"fontSize": "1.4rem", "fontWeight": "700", "color": C["text"]}),
+            ], style={"textAlign": "center"}), md=3)
+        )
+
+    card = html.Div([
+        # ── Card header ─────────────────────────────────────────────────────
+        html.Div([
+            html.Div([
+                html.Span("ACCRA HOME PRICE INDEX",
+                          style={"fontSize": "0.65rem", "color": C["gold"],
+                                 "letterSpacing": "0.12em", "fontWeight": "700"}),
+                html.Div(label, style={"fontSize": "1.1rem", "fontWeight": "700",
+                                       "color": C["text"]}),
+                html.Div(f"{family} · Forecast: Dec {snap_year}  ·  "
+                         f"Report date: {datetime.date.today().strftime('%d %b %Y')}",
+                         style={"fontSize": "0.72rem", "color": C["muted"]}),
+            ], style={"flex": "1"}),
+            html.Div("MARKET BRIEFING", style={"fontSize": "0.75rem", "color": C["gold"],
+                                               "fontWeight": "700",
+                                               "border": f"1px solid {C['gold']}",
+                                               "padding": "4px 10px", "borderRadius": "4px",
+                                               "alignSelf": "center"}),
+        ], style={"display": "flex", "justifyContent": "space-between",
+                  "borderBottom": f"2px solid {C['gold']}",
+                  "paddingBottom": "8px", "marginBottom": "14px"}),
+
+        # ── KPI row ─────────────────────────────────────────────────────────
+        dbc.Row(stat_items, className="g-2 mb-3"),
+
+        # ── Scenario forecast table ──────────────────────────────────────────
+        html.Div(f"Scenario Forecasts — Dec {snap_year}",
+                 style={"fontSize": "0.75rem", "color": C["muted"],
+                        "textTransform": "uppercase", "letterSpacing": "0.06em",
+                        "marginBottom": "6px"}),
+        html.Table([
+            html.Thead(html.Tr([
+                html.Th("Scenario", style={"padding": "5px 10px", "fontSize": "0.75rem",
+                                            "color": C["gold"], "borderBottom": f"1px solid {C['border']}"}),
+                html.Th(f"AHPI Dec {snap_year}",
+                        style={"padding": "5px 10px", "fontSize": "0.75rem", "color": C["gold"],
+                               "borderBottom": f"1px solid {C['border']}"}),
+                html.Th("90% CI", style={"padding": "5px 10px", "fontSize": "0.75rem",
+                                          "color": C["gold"],
+                                          "borderBottom": f"1px solid {C['border']}"}),
+                html.Th("vs 2024", style={"padding": "5px 10px", "fontSize": "0.75rem",
+                                           "color": C["gold"],
+                                           "borderBottom": f"1px solid {C['border']}"}),
+                html.Th("FX Assumption", style={"padding": "5px 10px", "fontSize": "0.75rem",
+                                                 "color": C["gold"],
+                                                 "borderBottom": f"1px solid {C['border']}"}),
+            ])),
+            html.Tbody(fc_rows),
+        ], style={"width": "100%", "borderCollapse": "collapse",
+                  "backgroundColor": C["card"], "borderRadius": "6px",
+                  "marginBottom": "14px"}),
+
+        # ── Footer disclaimer ────────────────────────────────────────────────
+        html.Div(
+            "For informational purposes only. Not financial advice. "
+            "Forecasts generated by Facebook Prophet; 90% credible intervals shown. "
+            "Source: AHPI Prophet v2.1 · Base year 2015 = 100.",
+            style={"fontSize": "0.68rem", "color": C["muted"], "fontStyle": "italic",
+                   "borderTop": f"1px solid {C['border']}", "paddingTop": "8px",
+                   "textAlign": "center"},
+        ),
+    ], style={
+        "backgroundColor": C["card"],
+        "border": f"1px solid {C['border']}",
+        "borderRadius": "8px",
+        "padding": "18px 20px",
+        "fontFamily": "monospace",
+    })
+
+    return card
 
 
 # ── run ───────────────────────────────────────────────────────────────────────
