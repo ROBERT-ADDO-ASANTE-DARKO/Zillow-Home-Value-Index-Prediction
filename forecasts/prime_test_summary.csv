@@ -1,0 +1,7 @@
+area,slug,mae,rmse,mape_pct
+East Legon,east_legon,15.33,22.55,1.9
+Cantonments,cantonments,25.02,32.32,3.8
+Airport Residential,airport_residential,8.0,9.62,1.2
+Labone / Roman Ridge,labone_roman_ridge,8.75,11.14,1.2
+Dzorwulu / Abelenkpe,dzorwulu_abelenkpe,7.87,9.63,1.1
+Trasacco Valley,trasacco_valley,46.87,58.86,7.6
