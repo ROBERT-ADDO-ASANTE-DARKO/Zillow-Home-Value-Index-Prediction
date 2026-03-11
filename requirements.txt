@@ -1,18 +1,31 @@
-streamlit
-prophet
+# ── dashboard (runtime) ───────────────────────────────────────────────────────
+dash
+dash-bootstrap-components
+dash-extensions
+dash-leaflet
 plotly
-pandas
-gdown
-folium
-streamlit-folium
-geopy
+kaleido
 numpy
+pandas
+reportlab
+gunicorn
+
+# ── data collection ───────────────────────────────────────────────────────────
 requests
 beautifulsoup4
 lxml
 yfinance
-dash
-dash-bootstrap-components
-gunicorn
-dash-extensions
-dash-leaflet
+gdown
+
+# ── forecasting / modelling ───────────────────────────────────────────────────
+prophet
+scikit-learn
+
+# ── mapping helpers ───────────────────────────────────────────────────────────
+folium
+geopy
+geopandas
+
+# ── streamlit prototypes ──────────────────────────────────────────────────────
+streamlit
+streamlit-folium
