@@ -688,7 +688,7 @@ A full-featured Dash dashboard visualises all three datasets and all three Proph
 | **Macro** | All 20 regressors with correlation rankings |
 | **Correlation** | Regressor–AHPI Pearson heatmap and scatter |
 | **Seasonality** | Monthly seasonal factors for all markets |
-| **Map** | Mapbox bubble map of Accra districts and prime areas |
+| **Map** | Location dot map (Mapbox) + GIS Leaflet choropleth with animated time slider (2010–2029); play/pause animation across historical actuals and Bear/Base/Bull scenario forecasts |
 | **Forecast** | Mid-market Prophet: historical + test eval + Bear/Base/Bull scenarios + residuals |
 | **Prime Forecast** | Per-area Prophet: area selector, CI toggle, 2-panel figure, accuracy card, Dec 2026 targets |
 | **District Forecast** | Per-district Prophet: district selector, CI toggle, 2-panel figure, accuracy card, Dec 2026 targets |
@@ -701,7 +701,11 @@ python accra_dashboard.py
 python accra_dashboard.py --port 8080
 ```
 
-The Forecast, Prime Forecast, and District Forecast tabs share a common two-panel layout:
+The **Map tab** contains two sections:
+- **Location dot map:** Mapbox scatter map showing all 11 districts/areas with bubble size scaled to AHPI; segmented by Mid-Market / Prime / Both
+- **GIS choropleth:** Leaflet polygon map with per-neighbourhood price or forecast-growth shading, metric/scenario/tile controls, GeoJSON export, and an **animated time slider** spanning 2010–2029. Drag the slider or press ▶ to play — historical frames (2010–2024) show actual USD/sqm, GHS/sqm, or AHPI values; projected frames (2025–2029) show Prophet AHPI forecasts for the selected scenario. The colour scale is globally normalised so frames are directly comparable. A badge labels each frame as HISTORICAL or PROJECTED.
+
+The **Forecast, Prime Forecast, and District Forecast** tabs share a common two-panel layout:
 - **Upper panel (72%):** historical actuals (area fill), test-period predicted vs actual with 90% CI band, three scenario lines (2025–2026) each with their own CI shading
 - **Lower panel (28%):** monthly residual bar chart over the 2023–2024 test period
 - **Info cards:** dynamic MAE / RMSE / MAPE card and Dec 2026 scenario targets, both updating when the area/district selector changes
@@ -746,7 +750,8 @@ forecasts/
 
 ---
 
-*Document updated: March 2026 · Dataset version: 2.1 · Index base year: 2015 = 100*
+*Document updated: March 2026 · Dataset version: 2.2 · Index base year: 2015 = 100*
 *Three datasets: aggregate mid-market (180 × 22), per-district (900 × 5), prime areas (1,080 × 5)*
 *Prophet models: 12 trained (composite + 6 prime + 5 district) · Scenarios: Bear / Base / Bull (2025–2026) · Dashboard: 10-tab interactive Dash app (`accra_dashboard.py`)*
+*Map tab: GIS Leaflet choropleth with animated 2010–2029 time slider; globally normalised colour scale spans historical actuals and scenario forecasts.*
 *AHPI is an estimated index for research and forecasting purposes. It should not be used as the sole basis for individual investment decisions.*
