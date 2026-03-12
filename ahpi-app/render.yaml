@@ -1,0 +1,111 @@
+## Render deployment manifest for the AHPI Flutter + FastAPI application.
+##
+## Services
+## --------
+## 1. ahpi-api      – FastAPI backend (Python 3.11)
+## 2. ahpi-web      – Flutter web frontend (static site)
+## 3. ahpi-redis    – Redis instance (rate limiting)
+##
+## Environment variables
+## ---------------------
+## Set the following in the Render dashboard (or via render.yaml envVars):
+##   AUTH0_DOMAIN      – e.g. your-tenant.auth0.com
+##   AUTH0_AUDIENCE    – API identifier set in Auth0
+##   CORS_ORIGINS      – JSON array of allowed origins
+
+services:
+  # ---------------------------------------------------------------------------
+  # FastAPI backend
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: ahpi-api
+    runtime: python
+    region: oregon
+    plan: starter
+    rootDir: ahpi-app/backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: >
+      gunicorn app.main:app
+      --worker-class uvicorn.workers.UvicornWorker
+      --workers 2
+      --bind 0.0.0.0:$PORT
+      --timeout 120
+      --log-level info
+    envVars:
+      - key: AUTH0_DOMAIN
+        sync: false          # set manually in dashboard
+      - key: AUTH0_AUDIENCE
+        sync: false
+      - key: CORS_ORIGINS
+        value: '["https://ahpi-web.onrender.com"]'
+      - key: REDIS_URL
+        fromService:
+          name: ahpi-redis
+          type: redis
+          property: connectionString
+      - key: RATE_LIMIT_REQUESTS
+        value: "60"
+      - key: RATE_LIMIT_WINDOW_SECONDS
+        value: "60"
+      - key: APP_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: PYTHON_VERSION
+        value: 3.11.9
+    healthCheckPath: /health
+    autoDeploy: true
+
+  # ---------------------------------------------------------------------------
+  # Flutter web frontend (static site)
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: ahpi-web
+    runtime: static
+    region: oregon
+    plan: free
+    rootDir: ahpi-app/frontend
+    buildCommand: |
+      # Install Flutter SDK
+      git clone --depth 1 --branch stable https://github.com/flutter/flutter.git /opt/flutter
+      export PATH="$PATH:/opt/flutter/bin"
+      flutter channel stable
+      flutter upgrade --force
+      flutter pub get
+      flutter build web --release \
+        --dart-define=AUTH0_DOMAIN=$AUTH0_DOMAIN \
+        --dart-define=AUTH0_CLIENT_ID=$AUTH0_CLIENT_ID \
+        --dart-define=API_BASE_URL=https://ahpi-api.onrender.com/api/v1
+    staticPublishPath: build/web
+    envVars:
+      - key: AUTH0_DOMAIN
+        sync: false
+      - key: AUTH0_CLIENT_ID
+        sync: false
+    headers:
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
+    routes:
+      # SPA fallback – all paths serve index.html
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    autoDeploy: true
+
+# ---------------------------------------------------------------------------
+# Redis (managed by Render)
+# ---------------------------------------------------------------------------
+databases:
+  - name: ahpi-redis
+    type: redis
+    plan: free
+    region: oregon
+    maxmemoryPolicy: allkeys-lru
+    ipAllowList: []   # allow only internal Render network

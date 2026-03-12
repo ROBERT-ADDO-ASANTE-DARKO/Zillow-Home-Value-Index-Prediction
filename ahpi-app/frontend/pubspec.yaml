@@ -1,0 +1,52 @@
+name: ahpi_flutter
+description: Accra Home Price Index – Flutter mobile & web app.
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # State management
+  flutter_riverpod: ^2.6.1
+  riverpod_annotation: ^2.6.1
+
+  # Auth0
+  auth0_flutter: ^1.4.1
+
+  # HTTP
+  dio: ^5.7.0
+
+  # Charts
+  fl_chart: ^0.69.0
+
+  # Maps
+  flutter_map: ^7.0.2
+  latlong2: ^0.9.1
+
+  # UI
+  google_fonts: ^6.2.1
+  cached_network_image: ^3.4.1
+  shimmer: ^3.0.0
+
+  # Utilities
+  intl: ^0.19.0
+  shared_preferences: ^2.3.3
+  logger: ^2.5.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+  build_runner: ^2.4.13
+  riverpod_generator: ^2.6.1
+  custom_lint: ^0.7.0
+  riverpod_lint: ^2.6.1
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/
